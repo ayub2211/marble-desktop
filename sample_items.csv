@@ -1,0 +1,14 @@
+sku,name,category,unit_primary,unit_secondary,sqft_per_unit
+SLB-001,Carrara White,SLAB,sqft,slab,55
+SLB-002,Statuario Gold,SLAB,sqft,slab,48.5
+SLB-003,Calacatta Vena,SLAB,sqft,slab,52
+
+TIL-001,White Gloss 24x24,TILE,sqft,box,16
+TIL-002,Grey Matte 12x24,TILE,sqft,box,18
+TIL-003,Wood Look 6x36,TILE,sqft,box,14.4
+
+BLK-001,Granite Block Black,BLOCK,piece,, 
+BLK-002,Marble Block Beige,BLOCK,piece,,
+
+TBL-001,Round Dining Table White,TABLE,piece,,
+TBL-002,Coffee Table Black,TABLE,piece,,

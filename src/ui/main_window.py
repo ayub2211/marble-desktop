@@ -1,15 +1,10 @@
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QListWidget,
-    QStackedWidget, QLabel
+    QMainWindow, QWidget, QHBoxLayout, QListWidget,
+    QStackedWidget
 )
-from PySide6.QtCore import Qt
 
 from src.ui.pages.dashboard import DashboardPage
 from src.ui.pages.items import ItemsPage
-from src.ui.pages.slabs import SlabsPage
-from src.ui.pages.tiles import TilesPage
-from src.ui.pages.blocks import BlocksPage
-from src.ui.pages.tables import TablesPage
 
 
 class MainWindow(QMainWindow):
@@ -37,12 +32,12 @@ class MainWindow(QMainWindow):
 
         # Content area
         self.stack = QStackedWidget()
-        self.stack.addWidget(DashboardPage())  # index 0
-        self.stack.addWidget(ItemsPage())      # index 1
-        self.stack.addWidget(SlabsPage())      # index 2
-        self.stack.addWidget(TilesPage())      # index 3
-        self.stack.addWidget(BlocksPage())     # index 4
-        self.stack.addWidget(TablesPage())     # index 5
+        self.stack.addWidget(DashboardPage())
+        self.stack.addWidget(ItemsPage("ALL"))
+        self.stack.addWidget(ItemsPage("SLAB"))
+        self.stack.addWidget(ItemsPage("TILE"))
+        self.stack.addWidget(ItemsPage("BLOCK"))
+        self.stack.addWidget(ItemsPage("TABLE"))
 
         self.menu.currentRowChanged.connect(self.stack.setCurrentIndex)
 

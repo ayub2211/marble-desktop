@@ -1,9 +1,9 @@
-from src.db.database import engine, Base
-from src.db import models  # noqa: F401
+from src.db.database import Base, engine
+import src.db.models  # loads all models into Base metadata
 
-def init_db():
+def init():
     Base.metadata.create_all(bind=engine)
-    print("✅ Database tables created")
 
 if __name__ == "__main__":
-    init_db()
+    init()
+    print("DB tables ensured ✅")
