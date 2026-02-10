@@ -1,9 +1,9 @@
 # src/ui/pages/blocks.py
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QTableWidget, QTableWidgetItem,
-    QDialog, QFormLayout, QComboBox, QSpinBox, QLineEdit,
-    QMessageBox, QMenu
+    QPushButton, QTableWidget, QTableWidgetItem, QDialog,
+    QFormLayout, QComboBox, QSpinBox,
+    QLineEdit, QMessageBox, QMenu
 )
 from PySide6.QtCore import Qt
 
@@ -19,17 +19,20 @@ class AddEditBlockDialog(QDialog):
         super().__init__(parent)
         self.entry = entry
         self.setWindowTitle("Edit Block Stock" if entry else "Add Block Stock")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        # Items dropdown (BLOCK only)
-        self.item_dd = QComboBox()
         self._items = []
+        self._items_by_id = {}
         with get_db() as db:
             self._items = get_block_items(db)
 
+        for it in self._items:
+            self._items_by_id[it.id] = it
+
+        self.item_dd = QComboBox()
         for it in self._items:
             self.item_dd.addItem(f"{it.sku} — {it.name}", it.id)
 
@@ -37,7 +40,7 @@ class AddEditBlockDialog(QDialog):
         self.piece_count.setRange(0, 10_000_000)
 
         self.location = QLineEdit()
-        self.location.setPlaceholderText("e.g. Warehouse A / Rack 2")
+        self.location.setPlaceholderText("Optional location (e.g., Yard / Warehouse A)")
 
         self.notes = QLineEdit()
         self.notes.setPlaceholderText("Optional notes...")
@@ -66,7 +69,7 @@ class AddEditBlockDialog(QDialog):
             self.location.setText(entry.get("location") or "")
             self.notes.setText(entry.get("notes") or "")
 
-    def _set_selected_item(self, item_id):
+    def _set_selected_item(self, item_id: int):
         if not item_id:
             return
         for i in range(self.item_dd.count()):
@@ -81,7 +84,7 @@ class AddEditBlockDialog(QDialog):
             return
 
         data = {
-            "item_id": int(item_id),
+            "item_id": item_id,
             "piece_count": int(self.piece_count.value()),
             "location": self.location.text().strip() or None,
             "notes": self.notes.text().strip() or None,
@@ -104,17 +107,24 @@ class BlocksPage(QWidget):
         layout.addWidget(title)
 
         top = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search by SKU or Name...")
+        self.search.textChanged.connect(self.load_data)
+
         self.add_btn = QPushButton("+ Add Block Stock")
         self.add_btn.clicked.connect(self.add_entry)
+
+        top.addWidget(self.search, 2)
         top.addStretch()
         top.addWidget(self.add_btn)
         layout.addLayout(top)
 
-        self.table = QTableWidget(0, 6)
+        self.table = QTableWidget(0, 7)
         self.table.setHorizontalHeaderLabels([
-            "ID", "SKU", "Name", "Pieces", "Location", "Notes"
+            "ID", "SKU", "Name", "Pieces", "Location", "Notes", "Created"
         ])
         self.table.setColumnHidden(0, True)
+        self.table.setColumnHidden(6, True)  # created hidden (optional)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_menu)
@@ -125,15 +135,16 @@ class BlocksPage(QWidget):
     def load_data(self):
         self.table.setRowCount(0)
         with get_db() as db:
-            rows = list_blocks(db)
+            rows = list_blocks(db, self.search.text().strip())
             for r, row in enumerate(rows):
                 self.table.insertRow(r)
                 self.table.setItem(r, 0, QTableWidgetItem(str(row.id)))
-                self.table.setItem(r, 1, QTableWidgetItem(row.item.sku))
-                self.table.setItem(r, 2, QTableWidgetItem(row.item.name))
-                self.table.setItem(r, 3, QTableWidgetItem(str(row.piece_count or 0)))
+                self.table.setItem(r, 1, QTableWidgetItem(row.item.sku if row.item else ""))
+                self.table.setItem(r, 2, QTableWidgetItem(row.item.name if row.item else ""))
+                self.table.setItem(r, 3, QTableWidgetItem("" if row.piece_count is None else str(row.piece_count)))
                 self.table.setItem(r, 4, QTableWidgetItem(row.location or ""))
                 self.table.setItem(r, 5, QTableWidgetItem(row.notes or ""))
+                self.table.setItem(r, 6, QTableWidgetItem(str(getattr(row, "created_at", ""))))
 
     def selected_id(self):
         row = self.table.currentRow()

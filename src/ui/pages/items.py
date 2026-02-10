@@ -14,6 +14,12 @@ from src.ui.widgets.progress_dialog import ImportProgressDialog
 
 
 class AddEditItemDialog(QDialog):
+    """
+    ✅ Updated:
+    - BLOCK/TABLE par Secondary Unit + Sqft/Unit bhi editable (no forced disable)
+    - Sqft/Unit sirf tab enable hota hai jab Secondary Unit selected ho
+    - Category lock supported (ItemsPage("SLAB") etc)
+    """
     def __init__(self, parent=None, item=None, lock_category="ALL"):
         super().__init__(parent)
         self.item = item
@@ -62,11 +68,10 @@ class AddEditItemDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.save_btn.clicked.connect(self.on_save)
 
-        # ✅ dynamic rules
-        self.category.currentTextChanged.connect(self._apply_rules)
+        # dynamic rules
         self.unit_secondary.currentTextChanged.connect(self._apply_rules)
 
-        # ✅ load existing
+        # load existing
         if item:
             self.sku.setText(item.get("sku", ""))
             self.name.setText(item.get("name", ""))
@@ -75,7 +80,7 @@ class AddEditItemDialog(QDialog):
             self.unit_secondary.setCurrentText(item.get("unit_secondary") or "")
             self.sqft_per_unit.setValue(float(item.get("sqft_per_unit") or 0))
 
-        # ✅ lock category if page is SLAB/TILE/BLOCK/TABLE
+        # lock category if page is SLAB/TILE/BLOCK/TABLE
         if self.lock_category and self.lock_category != "ALL":
             self.category.setCurrentText(self.lock_category)
             self.category.setEnabled(False)
@@ -83,34 +88,23 @@ class AddEditItemDialog(QDialog):
         self._apply_rules()
 
     def _apply_rules(self):
-        cat = self.category.currentText()
+        """
+        ✅ Allow editing for all categories.
+        Only rule:
+        - if secondary unit empty => sqft_per_unit disabled
+        """
         sec = self.unit_secondary.currentText().strip()
 
-        if cat in ("BLOCK", "TABLE"):
-            self.unit_primary.setCurrentText("piece")
-            self.unit_primary.setEnabled(False)
+        # always allow editing
+        self.unit_primary.setEnabled(True)
+        self.unit_secondary.setEnabled(True)
 
-            self.unit_secondary.setCurrentText("")
-            self.unit_secondary.setEnabled(False)
-
+        # sqft enabled only if secondary selected
+        if not sec:
             self.sqft_per_unit.setValue(0)
             self.sqft_per_unit.setEnabled(False)
         else:
-            # SLAB/TILE
-            self.unit_primary.setEnabled(True)
-
-            # if category is locked, still allow primary edits (optional)
-            if self.lock_category and self.lock_category != "ALL":
-                # category locked only; units still editable
-                pass
-
-            self.unit_secondary.setEnabled(True)
-
-            if not sec:
-                self.sqft_per_unit.setValue(0)
-                self.sqft_per_unit.setEnabled(False)
-            else:
-                self.sqft_per_unit.setEnabled(True)
+            self.sqft_per_unit.setEnabled(True)
 
     def on_save(self):
         sku = self.sku.text().strip()
@@ -136,10 +130,7 @@ class AddEditItemDialog(QDialog):
         if unit_secondary:
             val = float(self.sqft_per_unit.value())
             data["sqft_per_unit"] = val if val > 0 else None
-
-        if category in ("BLOCK", "TABLE"):
-            data["unit_primary"] = "piece"
-            data["unit_secondary"] = None
+        else:
             data["sqft_per_unit"] = None
 
         self._data = data
@@ -253,7 +244,6 @@ class ItemsPage(QWidget):
         self.load_data()
 
     def load_data(self):
-        # safety guard (in case signal fires early)
         if not hasattr(self, "table") or self.table is None:
             return
 
@@ -266,7 +256,7 @@ class ItemsPage(QWidget):
                 self.table.setItem(row, 1, QTableWidgetItem(item.sku))
                 self.table.setItem(row, 2, QTableWidgetItem(item.name))
                 self.table.setItem(row, 3, QTableWidgetItem(item.category))
-                self.table.setItem(row, 4, QTableWidgetItem(item.unit_primary))
+                self.table.setItem(row, 4, QTableWidgetItem(item.unit_primary or ""))  # safe
                 self.table.setItem(row, 5, QTableWidgetItem(item.unit_secondary or ""))
 
                 sqft_txt = ""

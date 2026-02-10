@@ -1,34 +1,66 @@
 # src/db/slab_repo.py
+from sqlalchemy import desc, or_
 from sqlalchemy.orm import joinedload
-from src.db.models import SlabInventory
 
-def list_slabs(db, item_id=None):
-    q = db.query(SlabInventory).options(joinedload(SlabInventory.item)).filter(SlabInventory.is_active == True)
-    if item_id:
-        q = q.filter(SlabInventory.item_id == item_id)
-    return q.order_by(SlabInventory.id.desc()).all()
+from src.db.models import SlabInventory, Item
+
+
+def list_slabs(db, search_text: str = ""):
+    q = (
+        db.query(SlabInventory)
+        .options(joinedload(SlabInventory.item))
+        .filter(SlabInventory.is_active == True)
+    )
+
+    s = (search_text or "").strip()
+    if s:
+        like = f"%{s}%"
+        q = q.join(Item).filter(or_(Item.sku.ilike(like), Item.name.ilike(like)))
+
+    return q.order_by(desc(SlabInventory.id)).all()
+
 
 def create_slab_entry(db, data: dict):
-    row = SlabInventory(**data)
-    db.add(row)
+    entry = SlabInventory(**data)
+    db.add(entry)
     db.commit()
-    db.refresh(row)
-    return row
+    db.refresh(entry)
+    return entry
 
-def update_slab_entry(db, row_id: int, data: dict):
-    row = db.query(SlabInventory).get(row_id)
-    if not row:
+
+def get_slab_entry(db, entry_id: int):
+    return (
+        db.query(SlabInventory)
+        .options(joinedload(SlabInventory.item))
+        .get(entry_id)
+    )
+
+
+def update_slab_entry(db, entry_id: int, data: dict):
+    entry = db.query(SlabInventory).get(entry_id)
+    if not entry:
         return None
     for k, v in data.items():
-        setattr(row, k, v)
+        setattr(entry, k, v)
     db.commit()
-    db.refresh(row)
-    return row
+    db.refresh(entry)
+    return entry
 
-def soft_delete_slab_entry(db, row_id: int):
-    row = db.query(SlabInventory).get(row_id)
-    if row:
-        row.is_active = False
+
+def soft_delete_slab_entry(db, entry_id: int):
+    entry = db.query(SlabInventory).get(entry_id)
+    if entry:
+        entry.is_active = False
         db.commit()
         return True
     return False
+
+
+def get_slab_items(db):
+    # dropdown me sirf SLAB items
+    return (
+        db.query(Item)
+        .filter(Item.is_active == True, Item.category == "SLAB")
+        .order_by(Item.name.asc())
+        .all()
+    )
