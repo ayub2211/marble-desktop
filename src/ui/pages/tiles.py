@@ -12,6 +12,8 @@ from src.db.tile_repo import (
     list_tiles, create_tile_entry, update_tile_entry,
     soft_delete_tile_entry, get_tile_items, get_tile_entry
 )
+from src.db.location_repo import get_locations
+from src.ui.signals import signals
 
 
 class AddEditTileDialog(QDialog):
@@ -24,13 +26,11 @@ class AddEditTileDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        # --- load dropdown items once ---
+        # items
         self._items = []
         self._items_by_id = {}
-
         with get_db() as db:
             self._items = get_tile_items(db)
-
         for it in self._items:
             self._items_by_id[it.id] = it
 
@@ -45,8 +45,13 @@ class AddEditTileDialog(QDialog):
         self.total_sqft.setRange(0, 999_999_999)
         self.total_sqft.setDecimals(3)
 
-        self.location = QLineEdit()
-        self.location.setPlaceholderText("Optional location (e.g., Warehouse A)")
+        # locations
+        self.location_cb = QComboBox()
+        self.location_cb.addItem("Select Location...", None)
+        with get_db() as db:
+            locs = get_locations(db)
+        for loc in locs:
+            self.location_cb.addItem(loc.name, loc.id)
 
         self.notes = QLineEdit()
         self.notes.setPlaceholderText("Optional notes...")
@@ -54,12 +59,12 @@ class AddEditTileDialog(QDialog):
         form.addRow("Tile Item (SKU)", self.item_dd)
         form.addRow("Box Count", self.box_count)
         form.addRow("Total Sqft", self.total_sqft)
-        form.addRow("Location", self.location)
+        form.addRow("Location", self.location_cb)
         form.addRow("Notes", self.notes)
 
         layout.addLayout(form)
 
-        # Auto calc hooks
+        # auto calc
         self.item_dd.currentIndexChanged.connect(self._auto_calc_sqft)
         self.box_count.valueChanged.connect(self._auto_calc_sqft)
 
@@ -74,15 +79,13 @@ class AddEditTileDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.save_btn.clicked.connect(self.on_save)
 
-        # Prefill (edit)
         if entry:
             self._set_selected_item(entry.get("item_id"))
             self.box_count.setValue(int(entry.get("box_count") or 0))
             self.total_sqft.setValue(float(entry.get("total_sqft") or 0))
-            self.location.setText(entry.get("location") or "")
+            self._set_selected_location(entry.get("location_id"))
             self.notes.setText(entry.get("notes") or "")
 
-        # Run once
         self._auto_calc_sqft()
 
     def _set_selected_item(self, item_id: int):
@@ -93,22 +96,27 @@ class AddEditTileDialog(QDialog):
                 self.item_dd.setCurrentIndex(i)
                 break
 
+    def _set_selected_location(self, loc_id: int):
+        if loc_id is None:
+            self.location_cb.setCurrentIndex(0)
+            return
+        for i in range(self.location_cb.count()):
+            if self.location_cb.itemData(i) == loc_id:
+                self.location_cb.setCurrentIndex(i)
+                break
+
     def _auto_calc_sqft(self):
         item_id = self.item_dd.currentData()
         boxes = self.box_count.value()
-
         item = self._items_by_id.get(item_id)
         if not item:
             return
-
-        # If item has sqft_per_unit and boxes > 0 => auto update
         if item.sqft_per_unit and boxes > 0:
             try:
                 per = float(item.sqft_per_unit)
                 self.total_sqft.setValue(per * boxes)
             except Exception:
                 pass
-        # else: user can manually type total_sqft (we do not overwrite)
 
     def on_save(self):
         item_id = self.item_dd.currentData()
@@ -120,7 +128,7 @@ class AddEditTileDialog(QDialog):
             "item_id": item_id,
             "box_count": int(self.box_count.value()),
             "total_sqft": float(self.total_sqft.value()),
-            "location": self.location.text().strip() or None,
+            "location_id": self.location_cb.currentData(),
             "notes": self.notes.text().strip() or None,
         }
         self._data = data
@@ -140,9 +148,7 @@ class TilesPage(QWidget):
         title.setStyleSheet("font-size:22px;font-weight:700;")
         layout.addWidget(title)
 
-        # Top bar
         top = QHBoxLayout()
-
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search by SKU or Name...")
         self.search.textChanged.connect(self.load_data)
@@ -155,13 +161,12 @@ class TilesPage(QWidget):
         top.addWidget(self.add_btn)
         layout.addLayout(top)
 
-        # Table
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels([
             "ID", "SKU", "Name", "Box Count", "Sqft", "Location", "Notes", "Created"
         ])
         self.table.setColumnHidden(0, True)
-        self.table.setColumnHidden(7, True)  # created hidden (optional)
+        self.table.setColumnHidden(7, True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_menu)
@@ -173,7 +178,6 @@ class TilesPage(QWidget):
         self.table.setRowCount(0)
         with get_db() as db:
             rows = list_tiles(db, self.search.text().strip())
-
             for r, row in enumerate(rows):
                 self.table.insertRow(r)
                 self.table.setItem(r, 0, QTableWidgetItem(str(row.id)))
@@ -182,10 +186,11 @@ class TilesPage(QWidget):
 
                 box_txt = "" if row.box_count is None else str(row.box_count)
                 sqft_txt = "" if row.total_sqft is None else f"{float(row.total_sqft):.3f}"
+                loc_txt = row.location.name if getattr(row, "location", None) else ""
 
                 self.table.setItem(r, 3, QTableWidgetItem(box_txt))
                 self.table.setItem(r, 4, QTableWidgetItem(sqft_txt))
-                self.table.setItem(r, 5, QTableWidgetItem(row.location or ""))
+                self.table.setItem(r, 5, QTableWidgetItem(loc_txt))
                 self.table.setItem(r, 6, QTableWidgetItem(row.notes or ""))
                 self.table.setItem(r, 7, QTableWidgetItem(str(getattr(row, "created_at", ""))))
 
@@ -215,6 +220,7 @@ class TilesPage(QWidget):
                 with get_db() as db:
                     create_tile_entry(db, dlg.data)
                 self.load_data()
+                signals.inventory_changed.emit("tile")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not save:\n{e}")
 
@@ -227,7 +233,7 @@ class TilesPage(QWidget):
                 "item_id": entry.item_id,
                 "box_count": entry.box_count,
                 "total_sqft": entry.total_sqft,
-                "location": entry.location,
+                "location_id": entry.location_id,
                 "notes": entry.notes,
             }
 
@@ -237,6 +243,7 @@ class TilesPage(QWidget):
                 with get_db() as db:
                     update_tile_entry(db, entry_id, dlg.data)
                 self.load_data()
+                signals.inventory_changed.emit("tile")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not update:\n{e}")
 
@@ -247,3 +254,4 @@ class TilesPage(QWidget):
         with get_db() as db:
             soft_delete_tile_entry(db, entry_id)
         self.load_data()
+        signals.inventory_changed.emit("tile")

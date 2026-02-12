@@ -5,19 +5,24 @@ from sqlalchemy.orm import joinedload
 from src.db.models import BlockInventory, Item
 
 
-def list_blocks(db, search_text: str = ""):
+def list_blocks(db, q_text: str = ""):
     q = (
         db.query(BlockInventory)
-        .options(joinedload(BlockInventory.item))
+        .options(
+            joinedload(BlockInventory.item),
+            joinedload(BlockInventory.location),
+        )
         .filter(BlockInventory.is_active == True)
+        .order_by(desc(BlockInventory.id))
     )
 
-    s = (search_text or "").strip()
-    if s:
-        like = f"%{s}%"
-        q = q.join(Item).filter(or_(Item.sku.ilike(like), Item.name.ilike(like)))
+    if q_text:
+        like = f"%{q_text}%"
+        q = q.join(BlockInventory.item).filter(
+            or_(Item.sku.ilike(like), Item.name.ilike(like))
+        )
 
-    return q.order_by(desc(BlockInventory.id)).all()
+    return q.all()
 
 
 def create_block_entry(db, data: dict):
@@ -31,7 +36,10 @@ def create_block_entry(db, data: dict):
 def get_block_entry(db, entry_id: int):
     return (
         db.query(BlockInventory)
-        .options(joinedload(BlockInventory.item))
+        .options(
+            joinedload(BlockInventory.item),
+            joinedload(BlockInventory.location),
+        )
         .get(entry_id)
     )
 
@@ -57,6 +65,7 @@ def soft_delete_block_entry(db, entry_id: int):
 
 
 def get_block_items(db):
+    # dropdown me sirf BLOCK items
     return (
         db.query(Item)
         .filter(Item.is_active == True, Item.category == "BLOCK")

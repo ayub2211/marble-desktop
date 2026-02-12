@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from src.db.migrations import ensure_items_extra_columns
 
 load_dotenv()
 
@@ -12,3 +13,6 @@ if not DATABASE_URL:
 engine = create_engine(DATABASE_URL, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
+
+# Base.metadata.create_all(engine) ke baad:
+ensure_items_extra_columns(engine)

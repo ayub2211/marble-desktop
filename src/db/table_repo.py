@@ -5,19 +5,24 @@ from sqlalchemy.orm import joinedload
 from src.db.models import TableInventory, Item
 
 
-def list_tables(db, search_text: str = ""):
+def list_tables(db, q_text: str = ""):
     q = (
         db.query(TableInventory)
-        .options(joinedload(TableInventory.item))
+        .options(
+            joinedload(TableInventory.item),
+            joinedload(TableInventory.location),
+        )
         .filter(TableInventory.is_active == True)
+        .order_by(desc(TableInventory.id))
     )
 
-    s = (search_text or "").strip()
-    if s:
-        like = f"%{s}%"
-        q = q.join(Item).filter(or_(Item.sku.ilike(like), Item.name.ilike(like)))
+    if q_text:
+        like = f"%{q_text}%"
+        q = q.join(TableInventory.item).filter(
+            or_(Item.sku.ilike(like), Item.name.ilike(like))
+        )
 
-    return q.order_by(desc(TableInventory.id)).all()
+    return q.all()
 
 
 def create_table_entry(db, data: dict):
@@ -31,7 +36,10 @@ def create_table_entry(db, data: dict):
 def get_table_entry(db, entry_id: int):
     return (
         db.query(TableInventory)
-        .options(joinedload(TableInventory.item))
+        .options(
+            joinedload(TableInventory.item),
+            joinedload(TableInventory.location),
+        )
         .get(entry_id)
     )
 
@@ -57,6 +65,7 @@ def soft_delete_table_entry(db, entry_id: int):
 
 
 def get_table_items(db):
+    # dropdown me sirf TABLE items
     return (
         db.query(Item)
         .filter(Item.is_active == True, Item.category == "TABLE")

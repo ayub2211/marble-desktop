@@ -4,22 +4,31 @@ import csv
 from src.db.item_repo import upsert_by_sku
 
 
+def _parse_float_or_none(val):
+    s = (val or "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
 def _clean_row(row: dict) -> dict:
-    # expected headers: sku,name,category,unit_primary,unit_secondary,sqft_per_unit
-    sku = (row.get("sku") or "").strip()
+    sku = (row.get("sku") or "").strip().upper()
     name = (row.get("name") or "").strip()
+
     category = (row.get("category") or "").strip().upper()
 
     unit_primary = (row.get("unit_primary") or "").strip().lower() or "sqft"
     unit_secondary = (row.get("unit_secondary") or "").strip().lower() or None
 
-    sqft_per_unit_raw = (row.get("sqft_per_unit") or "").strip()
-    sqft_per_unit = None
-    if sqft_per_unit_raw:
-        try:
-            sqft_per_unit = float(sqft_per_unit_raw)
-        except Exception:
-            sqft_per_unit = None
+    sqft_per_unit = _parse_float_or_none(row.get("sqft_per_unit"))
+
+    # ✅ new optional fields
+    material = (row.get("material") or "").strip() or None
+    thickness = (row.get("thickness") or "").strip() or None
+    finish = (row.get("finish") or "").strip() or None
 
     data = {
         "sku": sku,
@@ -28,6 +37,9 @@ def _clean_row(row: dict) -> dict:
         "unit_primary": unit_primary,
         "unit_secondary": unit_secondary,
         "sqft_per_unit": sqft_per_unit,
+        "material": material,
+        "thickness": thickness,
+        "finish": finish,
     }
 
     # enforce rules for BLOCK/TABLE
@@ -51,11 +63,6 @@ def import_items_csv(
     progress_cb=None,
     stop_flag=None
 ):
-    """
-    progress_cb(percent:int, text:str)
-    stop_flag: function that returns True if cancelled
-    """
-
     inserted = 0
     updated = 0
     skipped = 0
@@ -64,7 +71,6 @@ def import_items_csv(
     def cancelled():
         return stop_flag() if stop_flag else False
 
-    # read all rows first (to calculate progress %)
     with open(file_path, "r", newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
@@ -73,9 +79,8 @@ def import_items_csv(
     if total == 0:
         return {"inserted": 0, "updated": 0, "skipped": 0, "errors": ["CSV is empty"]}
 
-    # IMPORTANT:
-    # upsert_by_sku MUST NOT commit inside. It should only add/update and return "inserted"/"updated".
-    # importer will commit in batches.
+    # ✅ Detect duplicate SKUs inside the CSV itself (case-insensitive)
+    seen = set()
 
     for i, row in enumerate(rows, start=1):
         if cancelled():
@@ -89,22 +94,25 @@ def import_items_csv(
                 skipped += 1
                 continue
 
-            # upsert
-            res = upsert_by_sku(db, data)  # returns "inserted" or "updated"
+            sku_key = data["sku"].upper()
+            if sku_key in seen:
+                skipped += 1
+                errors.append(f"Row {i}: duplicate SKU in CSV file ({data['sku']})")
+                continue
+            seen.add(sku_key)
+
+            res = upsert_by_sku(db, data)  # "inserted" or "updated"
             if res == "inserted":
                 inserted += 1
             else:
                 updated += 1
 
-            # flush to catch errors early (without committing every row)
             db.flush()
 
-            # batch commit
             if i % batch_size == 0:
                 db.commit()
 
         except Exception as e:
-            # rollback only the current failed row changes
             db.rollback()
             errors.append(f"Row {i}: {e}")
 
@@ -115,7 +123,6 @@ def import_items_csv(
                 f"Importing {i}/{total}... Inserted: {inserted} Updated: {updated} Skipped: {skipped}"
             )
 
-    # final commit
     try:
         db.commit()
     except Exception:
@@ -124,5 +131,4 @@ def import_items_csv(
     if progress_cb:
         progress_cb(100, "Done ✅")
 
-    # if cancelled mid-way, still return progress
     return {"inserted": inserted, "updated": updated, "skipped": skipped, "errors": errors}

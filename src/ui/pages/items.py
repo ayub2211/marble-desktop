@@ -1,4 +1,5 @@
 # src/ui/pages/items.py
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QComboBox,
@@ -12,13 +13,13 @@ from src.db.item_repo import search_items, create_item, update_item, soft_delete
 from src.db.importer import import_items_csv
 from src.ui.widgets.progress_dialog import ImportProgressDialog
 
+from src.ui.signals import signals
+
 
 class AddEditItemDialog(QDialog):
     """
     ✅ Updated:
-    - BLOCK/TABLE par Secondary Unit + Sqft/Unit bhi editable (no forced disable)
-    - Sqft/Unit sirf tab enable hota hai jab Secondary Unit selected ho
-    - Category lock supported (ItemsPage("SLAB") etc)
+    - Material / Thickness / Finish fields added (optional)
     """
     def __init__(self, parent=None, item=None, lock_category="ALL"):
         super().__init__(parent)
@@ -26,7 +27,7 @@ class AddEditItemDialog(QDialog):
         self.lock_category = lock_category
 
         self.setWindowTitle("Edit Item" if item else "Add Item")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -48,12 +49,26 @@ class AddEditItemDialog(QDialog):
         self.sqft_per_unit.setDecimals(3)
         self.sqft_per_unit.setValue(0)
 
+        # ✅ NEW
+        self.material = QLineEdit()
+        self.material.setPlaceholderText("e.g., Marble / Travertine / Stone")
+
+        self.thickness = QLineEdit()
+        self.thickness.setPlaceholderText("e.g., 2cm / 3cm")
+
+        self.finish = QLineEdit()
+        self.finish.setPlaceholderText("e.g., Honed / Polished")
+
         form.addRow("SKU", self.sku)
         form.addRow("Name", self.name)
         form.addRow("Category", self.category)
         form.addRow("Primary Unit", self.unit_primary)
         form.addRow("Secondary Unit", self.unit_secondary)
         form.addRow("Sqft per Secondary Unit", self.sqft_per_unit)
+
+        form.addRow("Material (optional)", self.material)
+        form.addRow("Thickness (optional)", self.thickness)
+        form.addRow("Finish (optional)", self.finish)
 
         layout.addLayout(form)
 
@@ -68,7 +83,6 @@ class AddEditItemDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.save_btn.clicked.connect(self.on_save)
 
-        # dynamic rules
         self.unit_secondary.currentTextChanged.connect(self._apply_rules)
 
         # load existing
@@ -76,9 +90,14 @@ class AddEditItemDialog(QDialog):
             self.sku.setText(item.get("sku", ""))
             self.name.setText(item.get("name", ""))
             self.category.setCurrentText(item.get("category", "SLAB"))
-            self.unit_primary.setCurrentText(item.get("unit_primary", "sqft"))
+            self.unit_primary.setCurrentText(item.get("unit_primary", "sqft") or "sqft")
             self.unit_secondary.setCurrentText(item.get("unit_secondary") or "")
             self.sqft_per_unit.setValue(float(item.get("sqft_per_unit") or 0))
+
+            # ✅ NEW
+            self.material.setText(item.get("material") or "")
+            self.thickness.setText(item.get("thickness") or "")
+            self.finish.setText(item.get("finish") or "")
 
         # lock category if page is SLAB/TILE/BLOCK/TABLE
         if self.lock_category and self.lock_category != "ALL":
@@ -88,18 +107,10 @@ class AddEditItemDialog(QDialog):
         self._apply_rules()
 
     def _apply_rules(self):
-        """
-        ✅ Allow editing for all categories.
-        Only rule:
-        - if secondary unit empty => sqft_per_unit disabled
-        """
         sec = self.unit_secondary.currentText().strip()
-
-        # always allow editing
         self.unit_primary.setEnabled(True)
         self.unit_secondary.setEnabled(True)
 
-        # sqft enabled only if secondary selected
         if not sec:
             self.sqft_per_unit.setValue(0)
             self.sqft_per_unit.setEnabled(False)
@@ -124,14 +135,17 @@ class AddEditItemDialog(QDialog):
             "category": category,
             "unit_primary": unit_primary,
             "unit_secondary": unit_secondary,
-            "sqft_per_unit": None
+            "sqft_per_unit": None,
+
+            # ✅ NEW
+            "material": self.material.text().strip() or None,
+            "thickness": self.thickness.text().strip() or None,
+            "finish": self.finish.text().strip() or None,
         }
 
         if unit_secondary:
             val = float(self.sqft_per_unit.value())
             data["sqft_per_unit"] = val if val > 0 else None
-        else:
-            data["sqft_per_unit"] = None
 
         self._data = data
         self.accept()
@@ -141,13 +155,10 @@ class AddEditItemDialog(QDialog):
         return getattr(self, "_data", None)
 
 
-# ---------------------------
-# Worker (runs in QThread)
-# ---------------------------
 class ImportWorker(QObject):
-    progress = Signal(int, str)     # percent, text
-    done = Signal(dict)            # result dict
-    failed = Signal(str)           # error message
+    progress = Signal(int, str)
+    done = Signal(dict)
+    failed = Signal(str)
 
     def __init__(self, file_path: str, batch_size: int = 500):
         super().__init__()
@@ -178,11 +189,6 @@ class ImportWorker(QObject):
 
 
 class ItemsPage(QWidget):
-    """
-    default_category:
-      - "ALL" -> dropdown enabled
-      - "SLAB"/"TILE"/"BLOCK"/"TABLE" -> dropdown locked
-    """
     def __init__(self, default_category="ALL"):
         super().__init__()
         self.default_category = default_category
@@ -193,7 +199,6 @@ class ItemsPage(QWidget):
         title.setStyleSheet("font-size:22px;font-weight:700;")
         layout.addWidget(title)
 
-        # ---------- Top bar (NO signals yet) ----------
         top = QHBoxLayout()
 
         self.search = QLineEdit()
@@ -203,7 +208,6 @@ class ItemsPage(QWidget):
         self.category.addItems(["ALL", "SLAB", "TILE", "BLOCK", "TABLE"])
         self.category.setCurrentText(default_category)
 
-        # lock dropdown if specific page
         if default_category != "ALL":
             self.category.setEnabled(False)
 
@@ -218,10 +222,12 @@ class ItemsPage(QWidget):
         top.addWidget(self.add_btn)
         layout.addLayout(top)
 
-        # ---------- Table (create BEFORE connecting signals) ----------
-        self.table = QTableWidget(0, 7)
+        # ✅ Updated columns (added Material/Thickness/Finish)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels([
-            "ID", "SKU", "Name", "Category", "Primary Unit", "Secondary Unit", "Sqft/Unit"
+            "ID", "SKU", "Name", "Category",
+            "Material", "Thickness", "Finish",
+            "Primary Unit", "Secondary Unit", "Sqft/Unit"
         ])
         self.table.setColumnHidden(0, True)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -229,24 +235,18 @@ class ItemsPage(QWidget):
         self.table.customContextMenuRequested.connect(self.open_menu)
         layout.addWidget(self.table)
 
-        # thread refs
         self._thread = None
         self._worker = None
         self._progress_dialog = None
 
-        # ---------- NOW connect signals ----------
         self.search.textChanged.connect(self.load_data)
         self.category.currentTextChanged.connect(self.load_data)
         self.import_btn.clicked.connect(self.import_csv)
         self.add_btn.clicked.connect(self.add_item)
 
-        # ---------- Initial load ----------
         self.load_data()
 
     def load_data(self):
-        if not hasattr(self, "table") or self.table is None:
-            return
-
         self.table.setRowCount(0)
         with get_db() as db:
             items = search_items(db, self.search.text().strip(), self.category.currentText())
@@ -256,8 +256,14 @@ class ItemsPage(QWidget):
                 self.table.setItem(row, 1, QTableWidgetItem(item.sku))
                 self.table.setItem(row, 2, QTableWidgetItem(item.name))
                 self.table.setItem(row, 3, QTableWidgetItem(item.category))
-                self.table.setItem(row, 4, QTableWidgetItem(item.unit_primary or ""))  # safe
-                self.table.setItem(row, 5, QTableWidgetItem(item.unit_secondary or ""))
+
+                # ✅ NEW
+                self.table.setItem(row, 4, QTableWidgetItem(getattr(item, "material", "") or ""))
+                self.table.setItem(row, 5, QTableWidgetItem(getattr(item, "thickness", "") or ""))
+                self.table.setItem(row, 6, QTableWidgetItem(getattr(item, "finish", "") or ""))
+
+                self.table.setItem(row, 7, QTableWidgetItem(item.unit_primary or ""))
+                self.table.setItem(row, 8, QTableWidgetItem(item.unit_secondary or ""))
 
                 sqft_txt = ""
                 if item.sqft_per_unit is not None:
@@ -266,7 +272,7 @@ class ItemsPage(QWidget):
                     except Exception:
                         sqft_txt = str(item.sqft_per_unit)
 
-                self.table.setItem(row, 6, QTableWidgetItem(sqft_txt))
+                self.table.setItem(row, 9, QTableWidgetItem(sqft_txt))
 
     def selected_item_id(self):
         row = self.table.currentRow()
@@ -287,9 +293,6 @@ class ItemsPage(QWidget):
         elif action == delete:
             self.delete_item(item_id)
 
-    # ---------------------------
-    # CSV Import with Progress
-    # ---------------------------
     def import_csv(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select CSV file", "", "CSV Files (*.csv)")
         if not file_path:
@@ -339,6 +342,10 @@ class ItemsPage(QWidget):
             self._progress_dialog = None
 
         self.import_btn.setEnabled(True)
+
+        # notify
+        signals.inventory_changed.emit("items")
+
         self.load_data()
 
         inserted = result.get("inserted", 0)
@@ -369,15 +376,13 @@ class ItemsPage(QWidget):
         self.import_btn.setEnabled(True)
         QMessageBox.critical(self, "Import Error", f"CSV import failed:\n{err}")
 
-    # ---------------------------
-    # CRUD
-    # ---------------------------
     def add_item(self):
         dlg = AddEditItemDialog(self, lock_category=self.default_category)
         if dlg.exec() == QDialog.Accepted:
             try:
                 with get_db() as db:
                     create_item(db, dlg.data)
+                signals.inventory_changed.emit("items")
                 self.load_data()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not save item:\n{e}")
@@ -396,6 +401,11 @@ class ItemsPage(QWidget):
                 "unit_primary": item.unit_primary,
                 "unit_secondary": item.unit_secondary,
                 "sqft_per_unit": item.sqft_per_unit,
+
+                # ✅ NEW
+                "material": getattr(item, "material", None),
+                "thickness": getattr(item, "thickness", None),
+                "finish": getattr(item, "finish", None),
             }
 
         dlg = AddEditItemDialog(self, existing, lock_category=self.default_category)
@@ -403,6 +413,7 @@ class ItemsPage(QWidget):
             try:
                 with get_db() as db:
                     update_item(db, item_id, dlg.data)
+                signals.inventory_changed.emit("items")
                 self.load_data()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not update item:\n{e}")
@@ -413,4 +424,6 @@ class ItemsPage(QWidget):
             return
         with get_db() as db:
             soft_delete_item(db, item_id)
+
+        signals.inventory_changed.emit("items")
         self.load_data()

@@ -1,5 +1,18 @@
+# src/db/item_repo.py
 from sqlalchemy import or_
 from src.db.models import Item
+
+
+ALLOWED_FIELDS = {
+    "sku", "name", "category",
+    "unit_primary", "unit_secondary", "sqft_per_unit",
+    "material", "thickness", "finish",
+}
+
+
+def _filtered(data: dict) -> dict:
+    """Keep only allowed keys (avoid random/unwanted fields)."""
+    return {k: v for k, v in (data or {}).items() if k in ALLOWED_FIELDS}
 
 
 def get_items(db, category=None):
@@ -11,17 +24,33 @@ def get_items(db, category=None):
 
 def search_items(db, q_text="", category=None):
     q = db.query(Item).filter(Item.is_active == True)
+
     if category and category != "ALL":
         q = q.filter(Item.category == category)
 
     if q_text:
         like = f"%{q_text}%"
-        q = q.filter(or_(Item.sku.ilike(like), Item.name.ilike(like)))
+        # ✅ search in new fields too
+        q = q.filter(or_(
+            Item.sku.ilike(like),
+            Item.name.ilike(like),
+            Item.material.ilike(like),
+            Item.thickness.ilike(like),
+            Item.finish.ilike(like),
+        ))
 
     return q.order_by(Item.id.desc()).all()
 
 
 def create_item(db, data):
+    data = _filtered(data)
+
+    # normalize
+    if data.get("sku"):
+        data["sku"] = data["sku"].strip().upper()
+    if data.get("category"):
+        data["category"] = data["category"].strip().upper()
+
     item = Item(**data)
     db.add(item)
     db.commit()
@@ -37,8 +66,18 @@ def update_item(db, item_id: int, data: dict):
     item = db.query(Item).get(item_id)
     if not item:
         return None
+
+    data = _filtered(data)
+
+    # normalize
+    if data.get("sku"):
+        data["sku"] = data["sku"].strip().upper()
+    if data.get("category"):
+        data["category"] = data["category"].strip().upper()
+
     for k, v in data.items():
         setattr(item, k, v)
+
     db.commit()
     db.refresh(item)
     return item
@@ -52,61 +91,36 @@ def soft_delete_item(db, item_id: int):
         return True
     return False
 
+
 def upsert_by_sku(db, data: dict):
     """
-    Upsert rule:
-    - If SKU exists => update fields
-    - If item is soft-deleted => reactivate (is_active=True)
-    Returns: ("inserted" | "updated", Item)
+    Upsert rule (case-insensitive):
+    - If SKU exists => update + reactivate if deleted
+    - Else insert new
+    Returns: "inserted" or "updated"
+    NOTE: no commit here; importer commits in batches
     """
-    sku = (data.get("sku") or "").strip()
+    data = _filtered(data)
+
+    sku = (data.get("sku") or "").strip().upper()
     if not sku:
         raise ValueError("SKU is required for upsert")
 
-    # case-insensitive match
+    data["sku"] = sku
+
+    if data.get("category"):
+        data["category"] = data["category"].strip().upper()
+
+    # ✅ case-insensitive match (fixes BLK-005 vs blk-005 issues)
     item = db.query(Item).filter(Item.sku.ilike(sku)).first()
 
     if item:
-        # Update existing
         for k, v in data.items():
             setattr(item, k, v)
-
-        # reactivate if deleted
         item.is_active = True
-
-        db.add(item)
-        return "updated", item
-
-    # Insert new
-    item = Item(**data)
-    item.is_active = True
-    db.add(item)
-    return "inserted", item
-# add into src/db/item_repo.py
-from src.db.models import Item
-
-
-def upsert_by_sku(db, data: dict):
-    """
-    Same SKU => update
-    If item exists but is_active=False => reactivate + update
-    Returns: "inserted" or "updated"
-    """
-    sku = data.get("sku")
-    if not sku:
-        raise ValueError("SKU missing")
-
-    item = db.query(Item).filter(Item.sku == sku).first()
-
-    if item:
-        # reactivate + update
-        item.is_active = True
-        for k, v in data.items():
-            setattr(item, k, v)
         db.add(item)
         return "updated"
 
-    # insert
     item = Item(**data)
     item.is_active = True
     db.add(item)

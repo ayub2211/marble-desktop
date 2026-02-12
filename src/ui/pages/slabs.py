@@ -12,6 +12,8 @@ from src.db.slab_repo import (
     list_slabs, create_slab_entry, update_slab_entry,
     soft_delete_slab_entry, get_slab_items, get_slab_entry
 )
+from src.db.location_repo import get_locations
+from src.ui.signals import signals
 
 
 class AddEditSlabDialog(QDialog):
@@ -24,12 +26,11 @@ class AddEditSlabDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        # load dropdown items once
+        # ---- load items once ----
         self._items = []
         self._items_by_id = {}
         with get_db() as db:
             self._items = get_slab_items(db)
-
         for it in self._items:
             self._items_by_id[it.id] = it
 
@@ -44,8 +45,13 @@ class AddEditSlabDialog(QDialog):
         self.total_sqft.setRange(0, 999_999_999)
         self.total_sqft.setDecimals(3)
 
-        self.location = QLineEdit()
-        self.location.setPlaceholderText("Optional location (e.g., Yard / Warehouse A)")
+        # ---- locations dropdown ----
+        self.location_cb = QComboBox()
+        self.location_cb.addItem("Select Location...", None)
+        with get_db() as db:
+            locs = get_locations(db)
+        for loc in locs:
+            self.location_cb.addItem(loc.name, loc.id)
 
         self.notes = QLineEdit()
         self.notes.setPlaceholderText("Optional notes...")
@@ -53,7 +59,7 @@ class AddEditSlabDialog(QDialog):
         form.addRow("Slab Item (SKU)", self.item_dd)
         form.addRow("Slab Count", self.slab_count)
         form.addRow("Total Sqft", self.total_sqft)
-        form.addRow("Location", self.location)
+        form.addRow("Location", self.location_cb)
         form.addRow("Notes", self.notes)
 
         layout.addLayout(form)
@@ -73,11 +79,12 @@ class AddEditSlabDialog(QDialog):
         self.cancel_btn.clicked.connect(self.reject)
         self.save_btn.clicked.connect(self.on_save)
 
+        # ---- prefill (edit) ----
         if entry:
             self._set_selected_item(entry.get("item_id"))
             self.slab_count.setValue(int(entry.get("slab_count") or 0))
             self.total_sqft.setValue(float(entry.get("total_sqft") or 0))
-            self.location.setText(entry.get("location") or "")
+            self._set_selected_location(entry.get("location_id"))
             self.notes.setText(entry.get("notes") or "")
 
         self._auto_calc_sqft()
@@ -90,10 +97,18 @@ class AddEditSlabDialog(QDialog):
                 self.item_dd.setCurrentIndex(i)
                 break
 
+    def _set_selected_location(self, loc_id: int):
+        if loc_id is None:
+            self.location_cb.setCurrentIndex(0)
+            return
+        for i in range(self.location_cb.count()):
+            if self.location_cb.itemData(i) == loc_id:
+                self.location_cb.setCurrentIndex(i)
+                break
+
     def _auto_calc_sqft(self):
         item_id = self.item_dd.currentData()
         slabs = self.slab_count.value()
-
         item = self._items_by_id.get(item_id)
         if not item:
             return
@@ -105,7 +120,7 @@ class AddEditSlabDialog(QDialog):
                 self.total_sqft.setValue(per * slabs)
             except Exception:
                 pass
-        # if sqft_per_unit missing -> user manually fill total_sqft
+        # else: user can manually type total_sqft (we don't block)
 
     def on_save(self):
         item_id = self.item_dd.currentData()
@@ -117,7 +132,7 @@ class AddEditSlabDialog(QDialog):
             "item_id": item_id,
             "slab_count": int(self.slab_count.value()),
             "total_sqft": float(self.total_sqft.value()),
-            "location": self.location.text().strip() or None,
+            "location_id": self.location_cb.currentData(),
             "notes": self.notes.text().strip() or None,
         }
         self._data = data
@@ -138,7 +153,6 @@ class SlabsPage(QWidget):
         layout.addWidget(title)
 
         top = QHBoxLayout()
-
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search by SKU or Name...")
         self.search.textChanged.connect(self.load_data)
@@ -156,7 +170,7 @@ class SlabsPage(QWidget):
             "ID", "SKU", "Name", "Slab Count", "Sqft", "Location", "Notes", "Created"
         ])
         self.table.setColumnHidden(0, True)
-        self.table.setColumnHidden(7, True)  # created hidden (optional)
+        self.table.setColumnHidden(7, True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_menu)
@@ -176,10 +190,11 @@ class SlabsPage(QWidget):
 
                 slab_txt = "" if row.slab_count is None else str(row.slab_count)
                 sqft_txt = "" if row.total_sqft is None else f"{float(row.total_sqft):.3f}"
+                loc_txt = row.location.name if getattr(row, "location", None) else ""
 
                 self.table.setItem(r, 3, QTableWidgetItem(slab_txt))
                 self.table.setItem(r, 4, QTableWidgetItem(sqft_txt))
-                self.table.setItem(r, 5, QTableWidgetItem(row.location or ""))
+                self.table.setItem(r, 5, QTableWidgetItem(loc_txt))
                 self.table.setItem(r, 6, QTableWidgetItem(row.notes or ""))
                 self.table.setItem(r, 7, QTableWidgetItem(str(getattr(row, "created_at", ""))))
 
@@ -209,6 +224,7 @@ class SlabsPage(QWidget):
                 with get_db() as db:
                     create_slab_entry(db, dlg.data)
                 self.load_data()
+                signals.inventory_changed.emit("slab")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not save:\n{e}")
 
@@ -221,7 +237,7 @@ class SlabsPage(QWidget):
                 "item_id": entry.item_id,
                 "slab_count": entry.slab_count,
                 "total_sqft": entry.total_sqft,
-                "location": entry.location,
+                "location_id": entry.location_id,
                 "notes": entry.notes,
             }
 
@@ -231,6 +247,7 @@ class SlabsPage(QWidget):
                 with get_db() as db:
                     update_slab_entry(db, entry_id, dlg.data)
                 self.load_data()
+                signals.inventory_changed.emit("slab")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not update:\n{e}")
 
@@ -241,3 +258,4 @@ class SlabsPage(QWidget):
         with get_db() as db:
             soft_delete_slab_entry(db, entry_id)
         self.load_data()
+        signals.inventory_changed.emit("slab")

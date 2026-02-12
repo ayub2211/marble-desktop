@@ -5,19 +5,24 @@ from sqlalchemy.orm import joinedload
 from src.db.models import TileInventory, Item
 
 
-def list_tiles(db, search_text: str = ""):
+def list_tiles(db, q_text: str = ""):
     q = (
         db.query(TileInventory)
-        .options(joinedload(TileInventory.item))
+        .options(
+            joinedload(TileInventory.item),
+            joinedload(TileInventory.location),
+        )
         .filter(TileInventory.is_active == True)
+        .order_by(desc(TileInventory.id))
     )
 
-    s = (search_text or "").strip()
-    if s:
-        like = f"%{s}%"
-        q = q.join(Item).filter(or_(Item.sku.ilike(like), Item.name.ilike(like)))
+    if q_text:
+        like = f"%{q_text}%"
+        q = q.join(TileInventory.item).filter(
+            or_(Item.sku.ilike(like), Item.name.ilike(like))
+        )
 
-    return q.order_by(desc(TileInventory.id)).all()
+    return q.all()
 
 
 def create_tile_entry(db, data: dict):
@@ -31,7 +36,10 @@ def create_tile_entry(db, data: dict):
 def get_tile_entry(db, entry_id: int):
     return (
         db.query(TileInventory)
-        .options(joinedload(TileInventory.item))
+        .options(
+            joinedload(TileInventory.item),
+            joinedload(TileInventory.location),
+        )
         .get(entry_id)
     )
 
@@ -57,7 +65,7 @@ def soft_delete_tile_entry(db, entry_id: int):
 
 
 def get_tile_items(db):
-    # Dropdown me sirf TILE items
+    # dropdown me sirf TILE items
     return (
         db.query(Item)
         .filter(Item.is_active == True, Item.category == "TILE")

@@ -5,19 +5,24 @@ from sqlalchemy.orm import joinedload
 from src.db.models import SlabInventory, Item
 
 
-def list_slabs(db, search_text: str = ""):
+def list_slabs(db, q_text: str = ""):
     q = (
         db.query(SlabInventory)
-        .options(joinedload(SlabInventory.item))
+        .options(
+            joinedload(SlabInventory.item),
+            joinedload(SlabInventory.location),
+        )
         .filter(SlabInventory.is_active == True)
+        .order_by(desc(SlabInventory.id))
     )
 
-    s = (search_text or "").strip()
-    if s:
-        like = f"%{s}%"
-        q = q.join(Item).filter(or_(Item.sku.ilike(like), Item.name.ilike(like)))
+    if q_text:
+        like = f"%{q_text}%"
+        q = q.join(SlabInventory.item).filter(
+            or_(Item.sku.ilike(like), Item.name.ilike(like))
+        )
 
-    return q.order_by(desc(SlabInventory.id)).all()
+    return q.all()
 
 
 def create_slab_entry(db, data: dict):
@@ -31,7 +36,10 @@ def create_slab_entry(db, data: dict):
 def get_slab_entry(db, entry_id: int):
     return (
         db.query(SlabInventory)
-        .options(joinedload(SlabInventory.item))
+        .options(
+            joinedload(SlabInventory.item),
+            joinedload(SlabInventory.location),
+        )
         .get(entry_id)
     )
 

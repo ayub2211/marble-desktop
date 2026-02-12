@@ -12,6 +12,8 @@ from src.db.table_repo import (
     list_tables, create_table_entry, update_table_entry,
     soft_delete_table_entry, get_table_items, get_table_entry
 )
+from src.db.location_repo import get_locations
+from src.ui.signals import signals
 
 
 class AddEditTableDialog(QDialog):
@@ -24,13 +26,10 @@ class AddEditTableDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
+        # items
         self._items = []
-        self._items_by_id = {}
         with get_db() as db:
             self._items = get_table_items(db)
-
-        for it in self._items:
-            self._items_by_id[it.id] = it
 
         self.item_dd = QComboBox()
         for it in self._items:
@@ -39,15 +38,20 @@ class AddEditTableDialog(QDialog):
         self.piece_count = QSpinBox()
         self.piece_count.setRange(0, 10_000_000)
 
-        self.location = QLineEdit()
-        self.location.setPlaceholderText("Optional location (e.g., Showroom / Store)")
+        # locations
+        self.location_cb = QComboBox()
+        self.location_cb.addItem("Select Location...", None)
+        with get_db() as db:
+            locs = get_locations(db)
+        for loc in locs:
+            self.location_cb.addItem(loc.name, loc.id)
 
         self.notes = QLineEdit()
         self.notes.setPlaceholderText("Optional notes...")
 
         form.addRow("Table Item (SKU)", self.item_dd)
         form.addRow("Pieces", self.piece_count)
-        form.addRow("Location", self.location)
+        form.addRow("Location", self.location_cb)
         form.addRow("Notes", self.notes)
 
         layout.addLayout(form)
@@ -66,7 +70,7 @@ class AddEditTableDialog(QDialog):
         if entry:
             self._set_selected_item(entry.get("item_id"))
             self.piece_count.setValue(int(entry.get("piece_count") or 0))
-            self.location.setText(entry.get("location") or "")
+            self._set_selected_location(entry.get("location_id"))
             self.notes.setText(entry.get("notes") or "")
 
     def _set_selected_item(self, item_id: int):
@@ -75,6 +79,15 @@ class AddEditTableDialog(QDialog):
         for i in range(self.item_dd.count()):
             if self.item_dd.itemData(i) == item_id:
                 self.item_dd.setCurrentIndex(i)
+                break
+
+    def _set_selected_location(self, loc_id: int):
+        if loc_id is None:
+            self.location_cb.setCurrentIndex(0)
+            return
+        for i in range(self.location_cb.count()):
+            if self.location_cb.itemData(i) == loc_id:
+                self.location_cb.setCurrentIndex(i)
                 break
 
     def on_save(self):
@@ -86,7 +99,7 @@ class AddEditTableDialog(QDialog):
         data = {
             "item_id": item_id,
             "piece_count": int(self.piece_count.value()),
-            "location": self.location.text().strip() or None,
+            "location_id": self.location_cb.currentData(),
             "notes": self.notes.text().strip() or None,
         }
         self._data = data
@@ -124,7 +137,7 @@ class TablesPage(QWidget):
             "ID", "SKU", "Name", "Pieces", "Location", "Notes", "Created"
         ])
         self.table.setColumnHidden(0, True)
-        self.table.setColumnHidden(6, True)  # created hidden (optional)
+        self.table.setColumnHidden(6, True)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_menu)
@@ -141,8 +154,12 @@ class TablesPage(QWidget):
                 self.table.setItem(r, 0, QTableWidgetItem(str(row.id)))
                 self.table.setItem(r, 1, QTableWidgetItem(row.item.sku if row.item else ""))
                 self.table.setItem(r, 2, QTableWidgetItem(row.item.name if row.item else ""))
-                self.table.setItem(r, 3, QTableWidgetItem("" if row.piece_count is None else str(row.piece_count)))
-                self.table.setItem(r, 4, QTableWidgetItem(row.location or ""))
+
+                pieces_txt = "" if row.piece_count is None else str(row.piece_count)
+                loc_txt = row.location.name if getattr(row, "location", None) else ""
+
+                self.table.setItem(r, 3, QTableWidgetItem(pieces_txt))
+                self.table.setItem(r, 4, QTableWidgetItem(loc_txt))
                 self.table.setItem(r, 5, QTableWidgetItem(row.notes or ""))
                 self.table.setItem(r, 6, QTableWidgetItem(str(getattr(row, "created_at", ""))))
 
@@ -172,6 +189,7 @@ class TablesPage(QWidget):
                 with get_db() as db:
                     create_table_entry(db, dlg.data)
                 self.load_data()
+                signals.inventory_changed.emit("table")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not save:\n{e}")
 
@@ -183,7 +201,7 @@ class TablesPage(QWidget):
             existing = {
                 "item_id": entry.item_id,
                 "piece_count": entry.piece_count,
-                "location": entry.location,
+                "location_id": entry.location_id,
                 "notes": entry.notes,
             }
 
@@ -193,6 +211,7 @@ class TablesPage(QWidget):
                 with get_db() as db:
                     update_table_entry(db, entry_id, dlg.data)
                 self.load_data()
+                signals.inventory_changed.emit("table")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not update:\n{e}")
 
@@ -203,3 +222,4 @@ class TablesPage(QWidget):
         with get_db() as db:
             soft_delete_table_entry(db, entry_id)
         self.load_data()
+        signals.inventory_changed.emit("table")
