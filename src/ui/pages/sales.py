@@ -1,4 +1,4 @@
-# src/ui/pages/purchases.py
+# src/ui/pages/sales.py
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QDialog, QFormLayout, QLineEdit,
@@ -7,57 +7,50 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from src.db.session import get_db
-from src.db.location_repo import get_locations
+from src.db.location_repo import get_locations   # ✅ correct import
 from src.db.item_repo import get_items
-from src.db.purchase_repo import create_purchase, list_purchases
+from src.db.sales_repo import create_sale, list_sales
 from src.ui.signals import signals
 
 
-class AddPurchaseDialog(QDialog):
+class AddSaleDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Add Purchase")
-        self.setMinimumWidth(820)
+        self.setWindowTitle("Add Sale")
+        self.setMinimumWidth(780)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.vendor = QLineEdit()
-        self.vendor.setPlaceholderText("Optional vendor name...")
-
-        self.notes = QLineEdit()
-        self.notes.setPlaceholderText("Optional notes...")
+        self.customer = QLineEdit()
+        self.customer.setPlaceholderText("Optional customer name...")
 
         self.loc_dd = QComboBox()
-        self.loc_dd.addItem("Select Location...", None)
+        self.loc_dd.addItem("—", None)
 
         with get_db() as db:
-            self._locations = get_locations(db)
+            self._locations = get_locations(db)  # ✅ fixed (was list_locations)
             for l in self._locations:
                 self.loc_dd.addItem(l.name, l.id)
 
             self._items = get_items(db, category="ALL")
             self._items_by_id = {it.id: it for it in self._items}
 
-        form.addRow("Vendor", self.vendor)
+        form.addRow("Customer", self.customer)
         form.addRow("Location", self.loc_dd)
-        form.addRow("Notes", self.notes)
         layout.addLayout(form)
 
         # rows table
         self.rows = QTableWidget(0, 5)
         self.rows.setHorizontalHeaderLabels([
-            "Item", "Category",
-            "Qty Secondary (slab/box)",
-            "Qty Primary (sqft/piece)",
-            ""
+            "Item", "Category", "Qty Secondary (slab/box)", "Qty Primary (sqft/piece)", ""
         ])
         self.rows.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.rows)
 
         btn_row = QHBoxLayout()
         self.add_row_btn = QPushButton("+ Add Line")
-        self.save_btn = QPushButton("Save Purchase")
+        self.save_btn = QPushButton("Save Sale")
         btn_row.addWidget(self.add_row_btn)
         btn_row.addStretch()
         btn_row.addWidget(self.save_btn)
@@ -67,13 +60,6 @@ class AddPurchaseDialog(QDialog):
         self.save_btn.clicked.connect(self.on_save)
 
         self.add_line()
-
-    def _find_row_of_widget(self, w):
-        """Find row index where this widget lives (Remove button)."""
-        for r in range(self.rows.rowCount()):
-            if self.rows.cellWidget(r, 4) is w:
-                return r
-        return -1
 
     def add_line(self):
         r = self.rows.rowCount()
@@ -101,27 +87,28 @@ class AddPurchaseDialog(QDialog):
         self.rows.setCellWidget(r, 3, qty_pri)
         self.rows.setCellWidget(r, 4, del_btn)
 
-        # store current calc callback to avoid multiple connects
-        qty_sec._calc_cb = None
+        # ✅ keep one recalc handler only (prevent multi-connect issue)
+        def recalc_sqft_for_item(it):
+            if it and it.sqft_per_unit:
+                try:
+                    qty_pri.setValue(float(it.sqft_per_unit) * float(qty_sec.value()))
+                except Exception:
+                    pass
 
         def on_item_change():
             item_id = item_dd.currentData()
             it = self._items_by_id.get(item_id)
 
-            # cleanup old calc
-            if getattr(qty_sec, "_calc_cb", None):
-                try:
-                    qty_sec.valueChanged.disconnect(qty_sec._calc_cb)
-                except Exception:
-                    pass
-                qty_sec._calc_cb = None
+            # reset
+            try:
+                qty_sec.valueChanged.disconnect()
+            except Exception:
+                pass
 
             if not it:
                 cat_lbl.setText("—")
                 qty_sec.setEnabled(True)
                 qty_pri.setEnabled(True)
-                qty_sec.setValue(0)
-                qty_pri.setValue(0.0)
                 return
 
             cat = (it.category or "").upper()
@@ -131,35 +118,25 @@ class AddPurchaseDialog(QDialog):
                 qty_sec.setEnabled(True)
                 qty_pri.setEnabled(True)
 
-                def recalc():
-                    # if sqft_per_unit exists => auto total sqft = per * secondary
-                    if it.sqft_per_unit:
-                        try:
-                            qty_pri.setValue(float(it.sqft_per_unit) * float(qty_sec.value()))
-                        except Exception:
-                            pass
-
-                qty_sec._calc_cb = recalc
-                qty_sec.valueChanged.connect(recalc)
-                recalc()
+                qty_sec.valueChanged.connect(lambda: recalc_sqft_for_item(it))
+                recalc_sqft_for_item(it)
 
             else:
-                # BLOCK/TABLE: only primary is piece
                 qty_sec.setValue(0)
                 qty_sec.setEnabled(False)
                 qty_pri.setEnabled(True)
 
         def remove_row():
-            row_idx = self._find_row_of_widget(del_btn)
-            if row_idx >= 0:
-                self.rows.removeRow(row_idx)
+            # ✅ remove correct row (not the old captured index)
+            row = self.rows.indexAt(del_btn.parentWidget().pos()).row()
+            if row >= 0:
+                self.rows.removeRow(row)
 
         item_dd.currentIndexChanged.connect(on_item_change)
         del_btn.clicked.connect(remove_row)
 
     def on_save(self):
-        vendor = self.vendor.text().strip() or None
-        notes = self.notes.text().strip() or None
+        customer = self.customer.text().strip() or None
         location_id = self.loc_dd.currentData()
 
         rows_payload = []
@@ -188,7 +165,7 @@ class AddPurchaseDialog(QDialog):
                 rows_payload.append({
                     "item_id": item_id,
                     "qty_secondary": None,
-                    "qty_primary": float(qty_pri.value()),  # piece count
+                    "qty_primary": float(qty_pri.value()),
                 })
 
         if not rows_payload:
@@ -196,9 +173,9 @@ class AddPurchaseDialog(QDialog):
             return
 
         self._data = {
-            "vendor_name": vendor,
+            "customer_name": customer,
             "location_id": location_id,
-            "notes": notes,
+            "notes": None,
             "rows": rows_payload
         }
         self.accept()
@@ -208,22 +185,22 @@ class AddPurchaseDialog(QDialog):
         return getattr(self, "_data", None)
 
 
-class PurchasesPage(QWidget):
+class SalesPage(QWidget):
     def __init__(self):
         super().__init__()
         layout = QVBoxLayout(self)
 
-        title = QLabel("Purchases")
+        title = QLabel("Sales")
         title.setStyleSheet("font-size:22px;font-weight:800;")
         layout.addWidget(title)
 
         top = QHBoxLayout()
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search vendor...")
+        self.search.setPlaceholderText("Search customer...")
         self.search.textChanged.connect(self.load_data)
 
-        self.add_btn = QPushButton("+ Add Purchase")
-        self.add_btn.clicked.connect(self.add_purchase)
+        self.add_btn = QPushButton("+ Add Sale")
+        self.add_btn.clicked.connect(self.add_sale)
 
         top.addWidget(self.search, 2)
         top.addStretch()
@@ -231,7 +208,7 @@ class PurchasesPage(QWidget):
         layout.addLayout(top)
 
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["ID", "Vendor", "Location", "Created"])
+        self.table.setHorizontalHeaderLabels(["ID", "Customer", "Location", "Created"])
         self.table.setColumnHidden(0, True)
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
@@ -241,23 +218,23 @@ class PurchasesPage(QWidget):
     def load_data(self):
         self.table.setRowCount(0)
         with get_db() as db:
-            rows = list_purchases(db, self.search.text().strip())
-            for r, p in enumerate(rows):
+            rows = list_sales(db, self.search.text().strip())
+            for r, s in enumerate(rows):
                 self.table.insertRow(r)
-                self.table.setItem(r, 0, QTableWidgetItem(str(p.id)))
-                self.table.setItem(r, 1, QTableWidgetItem(p.vendor_name or ""))
-                self.table.setItem(r, 2, QTableWidgetItem(p.location.name if p.location else ""))
-                self.table.setItem(r, 3, QTableWidgetItem(str(getattr(p, "created_at", ""))))
+                self.table.setItem(r, 0, QTableWidgetItem(str(s.id)))
+                self.table.setItem(r, 1, QTableWidgetItem(s.customer_name or ""))
+                self.table.setItem(r, 2, QTableWidgetItem(s.location.name if s.location else ""))
+                self.table.setItem(r, 3, QTableWidgetItem(str(getattr(s, "created_at", ""))))
 
-    def add_purchase(self):
-        dlg = AddPurchaseDialog(self)
+    def add_sale(self):
+        dlg = AddSaleDialog(self)
         if dlg.exec() == QDialog.Accepted:
             try:
                 with get_db() as db:
-                    create_purchase(db, dlg.data)
+                    create_sale(db, dlg.data)
 
                 signals.inventory_changed.emit("all")
                 self.load_data()
-                QMessageBox.information(self, "Saved", "Purchase saved ✅")
+                QMessageBox.information(self, "Saved", "Sale saved ✅")
             except Exception as e:
-                QMessageBox.critical(self, "Error", f"Could not save purchase:\n{e}")
+                QMessageBox.critical(self, "Error", f"Could not save sale:\n{e}")

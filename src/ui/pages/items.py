@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QObject, QThread, Signal
 
 from src.db.session import get_db
 from src.db.item_repo import search_items, create_item, update_item, soft_delete_item
-from src.db.importer import import_items_csv
+from src.db.importer import import_items_file  # ✅ CSV + Excel dispatcher
 from src.ui.widgets.progress_dialog import ImportProgressDialog
 
 from src.ui.signals import signals
@@ -175,7 +175,7 @@ class ImportWorker(QObject):
     def run(self):
         try:
             with get_db() as db:
-                result = import_items_csv(
+                result = import_items_file(
                     db,
                     self.file_path,
                     mode="upsert",
@@ -211,7 +211,7 @@ class ItemsPage(QWidget):
         if default_category != "ALL":
             self.category.setEnabled(False)
 
-        self.import_btn = QPushButton("Import CSV")
+        self.import_btn = QPushButton("Import CSV/Excel")  # ✅ updated text
         self.add_btn = QPushButton("+ Add Item")
 
         top.addWidget(self.search, 2)
@@ -241,7 +241,7 @@ class ItemsPage(QWidget):
 
         self.search.textChanged.connect(self.load_data)
         self.category.currentTextChanged.connect(self.load_data)
-        self.import_btn.clicked.connect(self.import_csv)
+        self.import_btn.clicked.connect(self.import_file)  # ✅ renamed
         self.add_btn.clicked.connect(self.add_item)
 
         self.load_data()
@@ -293,22 +293,27 @@ class ItemsPage(QWidget):
         elif action == delete:
             self.delete_item(item_id)
 
-    def import_csv(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select CSV file", "", "CSV Files (*.csv)")
+    def import_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select CSV/Excel file",
+            "",
+            "CSV Files (*.csv);;Excel Files (*.xlsx)"
+        )
         if not file_path:
             return
 
         ok = QMessageBox.question(
             self,
             "Confirm Import",
-            "CSV import will UPSERT by SKU (same SKU => update + reactivate if deleted).\nContinue?"
+            "Import will UPSERT by SKU (same SKU => update + reactivate if deleted).\nContinue?"
         ) == QMessageBox.Yes
         if not ok:
             return
 
         self.import_btn.setEnabled(False)
 
-        dlg = ImportProgressDialog(self, title="Importing CSV")
+        dlg = ImportProgressDialog(self, title="Importing File")
         self._progress_dialog = dlg
 
         thread = QThread(self)
@@ -366,7 +371,7 @@ class ItemsPage(QWidget):
             if len(errors) > 15:
                 msg += f"\n...and {len(errors)-15} more."
 
-        QMessageBox.information(self, "CSV Import", msg)
+        QMessageBox.information(self, "Import", msg)
 
     def _on_import_failed(self, err: str):
         if self._progress_dialog:
@@ -374,7 +379,7 @@ class ItemsPage(QWidget):
             self._progress_dialog = None
 
         self.import_btn.setEnabled(True)
-        QMessageBox.critical(self, "Import Error", f"CSV import failed:\n{err}")
+        QMessageBox.critical(self, "Import Error", f"Import failed:\n{err}")
 
     def add_item(self):
         dlg = AddEditItemDialog(self, lock_category=self.default_category)
