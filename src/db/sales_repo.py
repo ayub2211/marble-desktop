@@ -56,29 +56,29 @@ def _validate_stock_or_raise(db, item: Item, location_id: int, qty_primary, qty_
 
     # stock rules
     if cat in ("BLOCK", "TABLE"):
-        if req_primary > avail_primary:
+        if req_primary > float(avail_primary or 0):
             raise ValueError(
                 f"Insufficient stock (Location-wise)\n\n"
                 f"{item.sku} — {item.name}\n"
-                f"Available: {avail_primary:.3f} {item.unit_primary or 'piece'}\n"
+                f"Available: {float(avail_primary or 0):.3f} {item.unit_primary or 'piece'}\n"
                 f"Requested: {req_primary:.3f} {item.unit_primary or 'piece'}"
             )
         return
 
     # SLAB/TILE => both checks
-    if req_secondary > avail_secondary:
+    if req_secondary > int(avail_secondary or 0):
         raise ValueError(
             f"Insufficient stock (Location-wise)\n\n"
             f"{item.sku} — {item.name}\n"
-            f"Available: {avail_secondary} {item.unit_secondary or ''}\n"
+            f"Available: {int(avail_secondary or 0)} {item.unit_secondary or ''}\n"
             f"Requested: {req_secondary} {item.unit_secondary or ''}"
         )
 
-    if req_primary > avail_primary:
+    if req_primary > float(avail_primary or 0):
         raise ValueError(
             f"Insufficient stock (Location-wise)\n\n"
             f"{item.sku} — {item.name}\n"
-            f"Available: {avail_primary:.3f} {item.unit_primary or 'sqft'}\n"
+            f"Available: {float(avail_primary or 0):.3f} {item.unit_primary or 'sqft'}\n"
             f"Requested: {req_primary:.3f} {item.unit_primary or 'sqft'}"
         )
 
@@ -88,7 +88,6 @@ def create_sale(db, payload: dict) -> Sale:
     notes = (payload.get("notes") or "").strip() or None
     location_id = payload.get("location_id")
 
-    # ✅ location-wise enforcement
     if not location_id:
         raise ValueError("Location is required for sale.")
 
@@ -96,7 +95,6 @@ def create_sale(db, payload: dict) -> Sale:
     if not rows:
         raise ValueError("No sale rows found.")
 
-    # ✅ 1) VALIDATION PASS (no writes)
     prepared = []
     for r in rows:
         item_id = r.get("item_id")
@@ -110,6 +108,10 @@ def create_sale(db, payload: dict) -> Sale:
         qty_secondary = r.get("qty_secondary")
         qty_primary = r.get("qty_primary")
 
+        # ✅ ensure numeric
+        qty_primary = _to_float(qty_primary, 0.0)
+        qty_secondary = None if qty_secondary is None else _to_int(qty_secondary, 0)
+
         _validate_stock_or_raise(db, item, int(location_id), qty_primary, qty_secondary)
 
         prepared.append((item, qty_primary, qty_secondary))
@@ -117,7 +119,6 @@ def create_sale(db, payload: dict) -> Sale:
     if not prepared:
         raise ValueError("No valid sale lines found.")
 
-    # ✅ 2) Save header
     s = Sale(customer_name=customer, location_id=location_id, notes=notes)
     db.add(s)
     db.flush()  # s.id
@@ -127,24 +128,25 @@ def create_sale(db, payload: dict) -> Sale:
         unit_primary = item.unit_primary or ("piece" if cat in ("BLOCK", "TABLE") else "sqft")
         unit_secondary = item.unit_secondary
 
-        # line
+        line_qty_primary = float(qty_primary or 0)
+        line_qty_secondary = None if cat in ("BLOCK", "TABLE") else (None if qty_secondary is None else int(qty_secondary))
+
         db.add(SaleItem(
             sale_id=s.id,
             item_id=item.id,
-            qty_primary=qty_primary,
-            qty_secondary=(None if cat in ("BLOCK", "TABLE") else qty_secondary),
+            qty_primary=line_qty_primary,
+            qty_secondary=line_qty_secondary,
             unit_primary=unit_primary,
             unit_secondary=unit_secondary
         ))
 
-        # ledger entry (SALE = negative)
         add_ledger_entry(
             db=db,
             item_id=item.id,
             location_id=location_id,
             movement_type="SALE",
-            qty_primary=_neg(qty_primary),
-            qty_secondary=(-_to_int(qty_secondary) if qty_secondary is not None and cat in ("SLAB", "TILE") else None),
+            qty_primary=_neg(line_qty_primary),
+            qty_secondary=(-int(line_qty_secondary) if line_qty_secondary is not None else None),
             unit_primary=unit_primary,
             unit_secondary=unit_secondary,
             ref_type="sale",
@@ -153,34 +155,33 @@ def create_sale(db, payload: dict) -> Sale:
 
         note_text = f"Sale#{s.id}" + (f" — {customer}" if customer else "")
 
-        # update inventory tables (deduct)
         if cat == "SLAB":
             create_slab_entry(db, {
                 "item_id": item.id,
-                "slab_count": -_to_int(qty_secondary),
-                "total_sqft": _neg(qty_primary),
+                "slab_count": -int(line_qty_secondary or 0),
+                "total_sqft": _neg(line_qty_primary),
                 "location_id": location_id,
                 "notes": note_text
             })
         elif cat == "TILE":
             create_tile_entry(db, {
                 "item_id": item.id,
-                "box_count": -_to_int(qty_secondary),
-                "total_sqft": _neg(qty_primary),
+                "box_count": -int(line_qty_secondary or 0),
+                "total_sqft": _neg(line_qty_primary),
                 "location_id": location_id,
                 "notes": note_text
             })
         elif cat == "BLOCK":
             create_block_entry(db, {
                 "item_id": item.id,
-                "piece_count": -_to_int(qty_primary),
+                "piece_count": -int(line_qty_primary or 0),
                 "location_id": location_id,
                 "notes": note_text
             })
         elif cat == "TABLE":
             create_table_entry(db, {
                 "item_id": item.id,
-                "piece_count": -_to_int(qty_primary),
+                "piece_count": -int(line_qty_primary or 0),
                 "location_id": location_id,
                 "notes": note_text
             })
@@ -190,7 +191,7 @@ def create_sale(db, payload: dict) -> Sale:
     return s
 
 
-def list_sales(db, q_text: str = ""):
+def list_sales(db, q_text: str = "", limit: int = 300):
     q = (
         db.query(Sale)
         .options(joinedload(Sale.location))
@@ -199,4 +200,16 @@ def list_sales(db, q_text: str = ""):
     if q_text:
         like = f"%{q_text}%"
         q = q.filter(Sale.customer_name.ilike(like))
-    return q.all()
+    return q.limit(limit).all()
+
+
+def get_sale_details(db, sale_id: int):
+    return (
+        db.query(Sale)
+        .options(
+            joinedload(Sale.location),
+            joinedload(Sale.items).joinedload(SaleItem.item)
+        )
+        .filter(Sale.id == sale_id)
+        .first()
+    )

@@ -7,17 +7,18 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from src.db.session import get_db
-from src.db.location_repo import get_locations
+from src.db.location_repo import list_locations
 from src.db.item_repo import get_items
-from src.db.purchase_repo import create_purchase, list_purchases
+from src.db.purchase_repo import create_purchase, list_purchases, get_purchase_details
 from src.ui.signals import signals
+from src.ui.app_state import AppState
 
 
 class AddPurchaseDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Add Purchase")
-        self.setMinimumWidth(820)
+        self.setMinimumWidth(780)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -25,14 +26,11 @@ class AddPurchaseDialog(QDialog):
         self.vendor = QLineEdit()
         self.vendor.setPlaceholderText("Optional vendor name...")
 
-        self.notes = QLineEdit()
-        self.notes.setPlaceholderText("Optional notes...")
-
         self.loc_dd = QComboBox()
-        self.loc_dd.addItem("Select Location...", None)
+        self.loc_dd.addItem("—", None)
 
         with get_db() as db:
-            self._locations = get_locations(db)
+            self._locations = list_locations(db)
             for l in self._locations:
                 self.loc_dd.addItem(l.name, l.id)
 
@@ -41,17 +39,12 @@ class AddPurchaseDialog(QDialog):
 
         form.addRow("Vendor", self.vendor)
         form.addRow("Location", self.loc_dd)
-        form.addRow("Notes", self.notes)
         layout.addLayout(form)
 
-        # rows table
         self.rows = QTableWidget(0, 5)
-        self.rows.setHorizontalHeaderLabels([
-            "Item", "Category",
-            "Qty Secondary (slab/box)",
-            "Qty Primary (sqft/piece)",
-            ""
-        ])
+        self.rows.setHorizontalHeaderLabels(
+            ["Item", "Category", "Qty Secondary (slab/box)", "Qty Primary (sqft/piece)", ""]
+        )
         self.rows.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.rows)
 
@@ -67,13 +60,6 @@ class AddPurchaseDialog(QDialog):
         self.save_btn.clicked.connect(self.on_save)
 
         self.add_line()
-
-    def _find_row_of_widget(self, w):
-        """Find row index where this widget lives (Remove button)."""
-        for r in range(self.rows.rowCount()):
-            if self.rows.cellWidget(r, 4) is w:
-                return r
-        return -1
 
     def add_line(self):
         r = self.rows.rowCount()
@@ -101,27 +87,13 @@ class AddPurchaseDialog(QDialog):
         self.rows.setCellWidget(r, 3, qty_pri)
         self.rows.setCellWidget(r, 4, del_btn)
 
-        # store current calc callback to avoid multiple connects
-        qty_sec._calc_cb = None
-
         def on_item_change():
             item_id = item_dd.currentData()
             it = self._items_by_id.get(item_id)
-
-            # cleanup old calc
-            if getattr(qty_sec, "_calc_cb", None):
-                try:
-                    qty_sec.valueChanged.disconnect(qty_sec._calc_cb)
-                except Exception:
-                    pass
-                qty_sec._calc_cb = None
-
             if not it:
                 cat_lbl.setText("—")
                 qty_sec.setEnabled(True)
                 qty_pri.setEnabled(True)
-                qty_sec.setValue(0)
-                qty_pri.setValue(0.0)
                 return
 
             cat = (it.category or "").upper()
@@ -132,35 +104,38 @@ class AddPurchaseDialog(QDialog):
                 qty_pri.setEnabled(True)
 
                 def recalc():
-                    # if sqft_per_unit exists => auto total sqft = per * secondary
                     if it.sqft_per_unit:
                         try:
                             qty_pri.setValue(float(it.sqft_per_unit) * float(qty_sec.value()))
                         except Exception:
                             pass
 
-                qty_sec._calc_cb = recalc
+                try:
+                    qty_sec.valueChanged.disconnect()
+                except Exception:
+                    pass
                 qty_sec.valueChanged.connect(recalc)
                 recalc()
-
             else:
-                # BLOCK/TABLE: only primary is piece
                 qty_sec.setValue(0)
                 qty_sec.setEnabled(False)
                 qty_pri.setEnabled(True)
 
         def remove_row():
-            row_idx = self._find_row_of_widget(del_btn)
-            if row_idx >= 0:
-                self.rows.removeRow(row_idx)
+            row_to_remove = self.rows.indexAt(del_btn.pos()).row()
+            if row_to_remove >= 0:
+                self.rows.removeRow(row_to_remove)
 
         item_dd.currentIndexChanged.connect(on_item_change)
         del_btn.clicked.connect(remove_row)
 
     def on_save(self):
         vendor = self.vendor.text().strip() or None
-        notes = self.notes.text().strip() or None
         location_id = self.loc_dd.currentData()
+
+        if not location_id:
+            QMessageBox.warning(self, "Missing", "Location is required.")
+            return
 
         rows_payload = []
         for r in range(self.rows.rowCount()):
@@ -188,7 +163,7 @@ class AddPurchaseDialog(QDialog):
                 rows_payload.append({
                     "item_id": item_id,
                     "qty_secondary": None,
-                    "qty_primary": float(qty_pri.value()),  # piece count
+                    "qty_primary": float(qty_pri.value()),
                 })
 
         if not rows_payload:
@@ -198,7 +173,7 @@ class AddPurchaseDialog(QDialog):
         self._data = {
             "vendor_name": vendor,
             "location_id": location_id,
-            "notes": notes,
+            "notes": None,
             "rows": rows_payload
         }
         self.accept()
@@ -236,7 +211,16 @@ class PurchasesPage(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
+        # ✅ View details
+        self.table.doubleClicked.connect(self.open_details)
+
+        self.apply_permissions()
         self.load_data()
+
+    def apply_permissions(self):
+        can_add = AppState.can_add_transactions()
+        self.add_btn.setEnabled(can_add)
+        self.add_btn.setToolTip("" if can_add else "Viewer role: Adding purchases is disabled.")
 
     def load_data(self):
         self.table.setRowCount(0)
@@ -250,6 +234,14 @@ class PurchasesPage(QWidget):
                 self.table.setItem(r, 3, QTableWidgetItem(str(getattr(p, "created_at", ""))))
 
     def add_purchase(self):
+        if not AppState.can_add_transactions():
+            QMessageBox.information(
+                self,
+                "Permission",
+                "Viewer role: You can only view/export.\n\nPlease login as Admin/Staff."
+            )
+            return
+
         dlg = AddPurchaseDialog(self)
         if dlg.exec() == QDialog.Accepted:
             try:
@@ -261,3 +253,73 @@ class PurchasesPage(QWidget):
                 QMessageBox.information(self, "Saved", "Purchase saved ✅")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not save purchase:\n{e}")
+
+    def open_details(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+
+        try:
+            pid = int(self.table.item(row, 0).text())
+        except Exception:
+            return
+
+        with get_db() as db:
+            p = get_purchase_details(db, pid)
+
+        if not p:
+            QMessageBox.warning(self, "Not found", "Purchase not found.")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Purchase #{p.id} — Details")
+        dlg.setMinimumWidth(950)
+        layout = QVBoxLayout(dlg)
+
+        vendor = p.vendor_name or "-"
+        loc = p.location.name if p.location else "-"
+        created = str(getattr(p, "created_at", ""))
+        notes = getattr(p, "notes", None) or "-"
+
+        header = QLabel(
+            f"<b>Vendor:</b> {vendor}<br>"
+            f"<b>Location:</b> {loc}<br>"
+            f"<b>Created:</b> {created}<br>"
+            f"<b>Notes:</b> {notes}"
+        )
+        header.setTextFormat(Qt.RichText)
+        layout.addWidget(header)
+
+        lines = QTableWidget(0, 7)
+        lines.setHorizontalHeaderLabels(
+            ["SKU", "Name", "Category", "Primary Qty", "Primary Unit", "Secondary Qty", "Secondary Unit"]
+        )
+        lines.horizontalHeader().setStretchLastSection(True)
+
+        items = getattr(p, "items", []) or []
+        for r, li in enumerate(items):
+            it = getattr(li, "item", None)
+            sku = getattr(it, "sku", "") if it else ""
+            name = getattr(it, "name", "") if it else ""
+            cat = getattr(it, "category", "") if it else ""
+
+            lines.insertRow(r)
+            lines.setItem(r, 0, QTableWidgetItem(sku or ""))
+            lines.setItem(r, 1, QTableWidgetItem(name or ""))
+            lines.setItem(r, 2, QTableWidgetItem(cat or ""))
+
+            pri = float(getattr(li, "qty_primary", 0) or 0)
+            lines.setItem(r, 3, QTableWidgetItem(f"{pri:.3f}"))
+            lines.setItem(r, 4, QTableWidgetItem(getattr(li, "unit_primary", "") or ""))
+
+            sec_qty = getattr(li, "qty_secondary", None)
+            lines.setItem(r, 5, QTableWidgetItem("" if sec_qty is None else str(int(sec_qty))))
+            lines.setItem(r, 6, QTableWidgetItem(getattr(li, "unit_secondary", "") or ""))
+
+        layout.addWidget(lines)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignRight)
+
+        dlg.exec()

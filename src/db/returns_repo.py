@@ -1,12 +1,13 @@
 # src/db/returns_repo.py
+from __future__ import annotations
+
 from sqlalchemy.orm import joinedload
 
 from src.db.models import (
-    Item, Location,
+    Item,
     SaleReturn, SaleReturnItem,
-    PurchaseReturn, PurchaseReturnItem
+    PurchaseReturn, PurchaseReturnItem,
 )
-
 from src.db.ledger_repo import add_ledger_entry, get_stock_balance
 
 from src.db.slab_repo import create_slab_entry
@@ -33,19 +34,19 @@ def _pos_int(v):
 
 def _neg(v):
     try:
-        return -float(v)
+        return -float(v or 0)
     except Exception:
         return 0.0
 
 
 def _neg_int(v):
     try:
-        return -int(v)
+        return -int(v or 0)
     except Exception:
         return 0
 
 
-def _validate_return_row(item: Item, qty_primary, qty_secondary, for_category=None):
+def _validate_return_row(item: Item, qty_primary, qty_secondary):
     cat = (item.category or "").upper()
     qp = _pos_float(qty_primary)
 
@@ -56,15 +57,11 @@ def _validate_return_row(item: Item, qty_primary, qty_secondary, for_category=No
         qs = _pos_int(qty_secondary)
         if qs <= 0:
             raise ValueError(f"{cat} requires secondary qty (slab/box) for {item.sku} — {item.name}")
-    else:
-        # BLOCK / TABLE
-        # secondary not used
-        return
 
 
 def _validate_stock_or_raise(db, item: Item, location_id: int, qty_primary, qty_secondary):
     """
-    Used for PURCHASE RETURN (because it DEDUCTS stock).
+    Used for PURCHASE RETURN (it DEDUCTS stock).
     SLAB/TILE: validate both primary and secondary
     BLOCK/TABLE: validate primary only
     """
@@ -83,7 +80,6 @@ def _validate_stock_or_raise(db, item: Item, location_id: int, qty_primary, qty_
             )
         return
 
-    # SLAB / TILE
     if req_secondary > int(available_secondary or 0):
         raise ValueError(
             f"Insufficient stock for {item.sku} — {item.name}\n"
@@ -114,7 +110,7 @@ def create_sale_return(db, payload: dict) -> SaleReturn:
     if not rows:
         raise ValueError("At least one line is required.")
 
-    # validate rows
+    # validate all rows before writing
     for r in rows:
         item_id = r.get("item_id")
         if not item_id:
@@ -149,7 +145,6 @@ def create_sale_return(db, payload: dict) -> SaleReturn:
             unit_secondary=unit_secondary
         ))
 
-        # ledger POSITIVE
         add_ledger_entry(
             db=db,
             item_id=item.id,
@@ -165,7 +160,6 @@ def create_sale_return(db, payload: dict) -> SaleReturn:
 
         note_text = f"SaleReturn#{sr.id}" + (f" — {customer}" if customer else "")
 
-        # inventory POSITIVE
         if cat == "SLAB":
             create_slab_entry(db, {
                 "item_id": item.id,
@@ -202,7 +196,7 @@ def create_sale_return(db, payload: dict) -> SaleReturn:
     return sr
 
 
-def list_sale_returns(db, q_text: str = ""):
+def list_sale_returns(db, q_text: str = "", limit: int = 300):
     q = (
         db.query(SaleReturn)
         .options(joinedload(SaleReturn.location))
@@ -211,7 +205,19 @@ def list_sale_returns(db, q_text: str = ""):
     if q_text:
         like = f"%{q_text}%"
         q = q.filter(SaleReturn.customer_name.ilike(like))
-    return q.all()
+    return q.limit(limit).all()
+
+
+def get_sale_return_details(db, return_id: int) -> SaleReturn | None:
+    return (
+        db.query(SaleReturn)
+        .options(
+            joinedload(SaleReturn.location),
+            joinedload(SaleReturn.items).joinedload(SaleReturnItem.item),
+        )
+        .filter(SaleReturn.id == return_id)
+        .first()
+    )
 
 
 # -------------------------------------------------------
@@ -229,7 +235,7 @@ def create_purchase_return(db, payload: dict) -> PurchaseReturn:
     if not rows:
         raise ValueError("At least one line is required.")
 
-    # 1) validate rows + stock availability
+    # validate all rows before writing
     for r in rows:
         item_id = r.get("item_id")
         if not item_id:
@@ -240,9 +246,7 @@ def create_purchase_return(db, payload: dict) -> PurchaseReturn:
             raise ValueError("Item not found.")
 
         _validate_return_row(item, r.get("qty_primary"), r.get("qty_secondary"))
-
-        # stock check (because deducting)
-        _validate_stock_or_raise(db, item, location_id, r.get("qty_primary"), r.get("qty_secondary"))
+        _validate_stock_or_raise(db, item, int(location_id), r.get("qty_primary"), r.get("qty_secondary"))
 
     pr = PurchaseReturn(vendor_name=vendor, location_id=location_id, notes=notes)
     db.add(pr)
@@ -267,7 +271,6 @@ def create_purchase_return(db, payload: dict) -> PurchaseReturn:
             unit_secondary=unit_secondary
         ))
 
-        # ledger NEGATIVE
         add_ledger_entry(
             db=db,
             item_id=item.id,
@@ -283,7 +286,6 @@ def create_purchase_return(db, payload: dict) -> PurchaseReturn:
 
         note_text = f"PurchaseReturn#{pr.id}" + (f" — {vendor}" if vendor else "")
 
-        # inventory NEGATIVE
         if cat == "SLAB":
             create_slab_entry(db, {
                 "item_id": item.id,
@@ -320,7 +322,7 @@ def create_purchase_return(db, payload: dict) -> PurchaseReturn:
     return pr
 
 
-def list_purchase_returns(db, q_text: str = ""):
+def list_purchase_returns(db, q_text: str = "", limit: int = 300):
     q = (
         db.query(PurchaseReturn)
         .options(joinedload(PurchaseReturn.location))
@@ -329,4 +331,94 @@ def list_purchase_returns(db, q_text: str = ""):
     if q_text:
         like = f"%{q_text}%"
         q = q.filter(PurchaseReturn.vendor_name.ilike(like))
-    return q.all()
+    return q.limit(limit).all()
+
+
+def get_purchase_return_details(db, return_id: int) -> PurchaseReturn | None:
+    return (
+        db.query(PurchaseReturn)
+        .options(
+            joinedload(PurchaseReturn.location),
+            joinedload(PurchaseReturn.items).joinedload(PurchaseReturnItem.item),
+        )
+        .filter(PurchaseReturn.id == return_id)
+        .first()
+    )
+
+
+# -------------------------------------------------------
+# Backward compatible wrappers for UI
+# -------------------------------------------------------
+def create_return(db, payload: dict):
+    """
+    payload must include:
+      - return_type: "SALE_RETURN" or "PURCHASE_RETURN"
+      - location_id
+      - rows: [{item_id, qty_primary, qty_secondary}]
+      - optional: customer_name/vendor_name/notes
+    """
+    rtype = (payload.get("return_type") or payload.get("type") or "").strip().upper()
+
+    if rtype in ("SALE_RETURN", "SALE", "SR"):
+        return create_sale_return(db, payload)
+
+    if rtype in ("PURCHASE_RETURN", "PURCHASE", "PR"):
+        return create_purchase_return(db, payload)
+
+    raise ValueError("Invalid return_type. Use SALE_RETURN or PURCHASE_RETURN.")
+
+
+def list_returns(db, q_text: str = "", return_type: str = "ALL", limit: int = 300):
+    """
+    Returns unified rows for UI (dict):
+      { id, return_type, party_name, location_name, created_at, ref_type, ref_id }
+    """
+    rtype = (return_type or "ALL").strip().upper()
+
+    if rtype in ("SALE_RETURN", "SALE", "SR"):
+        sale_rows = list_sale_returns(db, q_text=q_text, limit=limit) or []
+        return [_to_row_sale(x) for x in sale_rows]
+
+    if rtype in ("PURCHASE_RETURN", "PURCHASE", "PR"):
+        pur_rows = list_purchase_returns(db, q_text=q_text, limit=limit) or []
+        return [_to_row_purchase(x) for x in pur_rows]
+
+    # ALL => merge newest first
+    sale_rows = list_sale_returns(db, q_text=q_text, limit=limit) or []
+    pur_rows = list_purchase_returns(db, q_text=q_text, limit=limit) or []
+
+    merged = [*_to_row_sale_list(sale_rows), *_to_row_purchase_list(pur_rows)]
+    merged.sort(key=lambda x: (x.get("created_at") is not None, x.get("created_at"), x.get("id", 0)), reverse=True)
+    return merged[:limit]
+
+
+def _to_row_sale(sr: SaleReturn) -> dict:
+    return {
+        "id": sr.id,
+        "return_type": "SALE_RETURN",
+        "party_name": sr.customer_name or "",
+        "location_name": sr.location.name if getattr(sr, "location", None) else "",
+        "created_at": getattr(sr, "created_at", None),
+        "ref_type": "sale_return",
+        "ref_id": sr.id,
+    }
+
+
+def _to_row_purchase(pr: PurchaseReturn) -> dict:
+    return {
+        "id": pr.id,
+        "return_type": "PURCHASE_RETURN",
+        "party_name": pr.vendor_name or "",
+        "location_name": pr.location.name if getattr(pr, "location", None) else "",
+        "created_at": getattr(pr, "created_at", None),
+        "ref_type": "purchase_return",
+        "ref_id": pr.id,
+    }
+
+
+def _to_row_sale_list(rows):
+    return [_to_row_sale(x) for x in rows]
+
+
+def _to_row_purchase_list(rows):
+    return [_to_row_purchase(x) for x in rows]

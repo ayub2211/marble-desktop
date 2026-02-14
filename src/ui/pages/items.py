@@ -12,8 +12,8 @@ from src.db.session import get_db
 from src.db.item_repo import search_items, create_item, update_item, soft_delete_item
 from src.db.importer import import_items_file  # ✅ CSV + Excel dispatcher
 from src.ui.widgets.progress_dialog import ImportProgressDialog
-
 from src.ui.signals import signals
+from src.ui.app_state import AppState
 
 
 class AddEditItemDialog(QDialog):
@@ -49,7 +49,6 @@ class AddEditItemDialog(QDialog):
         self.sqft_per_unit.setDecimals(3)
         self.sqft_per_unit.setValue(0)
 
-        # ✅ NEW
         self.material = QLineEdit()
         self.material.setPlaceholderText("e.g., Marble / Travertine / Stone")
 
@@ -85,7 +84,6 @@ class AddEditItemDialog(QDialog):
 
         self.unit_secondary.currentTextChanged.connect(self._apply_rules)
 
-        # load existing
         if item:
             self.sku.setText(item.get("sku", ""))
             self.name.setText(item.get("name", ""))
@@ -94,12 +92,10 @@ class AddEditItemDialog(QDialog):
             self.unit_secondary.setCurrentText(item.get("unit_secondary") or "")
             self.sqft_per_unit.setValue(float(item.get("sqft_per_unit") or 0))
 
-            # ✅ NEW
             self.material.setText(item.get("material") or "")
             self.thickness.setText(item.get("thickness") or "")
             self.finish.setText(item.get("finish") or "")
 
-        # lock category if page is SLAB/TILE/BLOCK/TABLE
         if self.lock_category and self.lock_category != "ALL":
             self.category.setCurrentText(self.lock_category)
             self.category.setEnabled(False)
@@ -108,9 +104,6 @@ class AddEditItemDialog(QDialog):
 
     def _apply_rules(self):
         sec = self.unit_secondary.currentText().strip()
-        self.unit_primary.setEnabled(True)
-        self.unit_secondary.setEnabled(True)
-
         if not sec:
             self.sqft_per_unit.setValue(0)
             self.sqft_per_unit.setEnabled(False)
@@ -137,7 +130,6 @@ class AddEditItemDialog(QDialog):
             "unit_secondary": unit_secondary,
             "sqft_per_unit": None,
 
-            # ✅ NEW
             "material": self.material.text().strip() or None,
             "thickness": self.thickness.text().strip() or None,
             "finish": self.finish.text().strip() or None,
@@ -207,11 +199,10 @@ class ItemsPage(QWidget):
         self.category = QComboBox()
         self.category.addItems(["ALL", "SLAB", "TILE", "BLOCK", "TABLE"])
         self.category.setCurrentText(default_category)
-
         if default_category != "ALL":
             self.category.setEnabled(False)
 
-        self.import_btn = QPushButton("Import CSV/Excel")  # ✅ updated text
+        self.import_btn = QPushButton("Import CSV/Excel")
         self.add_btn = QPushButton("+ Add Item")
 
         top.addWidget(self.search, 2)
@@ -222,7 +213,6 @@ class ItemsPage(QWidget):
         top.addWidget(self.add_btn)
         layout.addLayout(top)
 
-        # ✅ Updated columns (added Material/Thickness/Finish)
         self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels([
             "ID", "SKU", "Name", "Category",
@@ -231,6 +221,7 @@ class ItemsPage(QWidget):
         ])
         self.table.setColumnHidden(0, True)
         self.table.horizontalHeader().setStretchLastSection(True)
+
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_menu)
         layout.addWidget(self.table)
@@ -241,10 +232,25 @@ class ItemsPage(QWidget):
 
         self.search.textChanged.connect(self.load_data)
         self.category.currentTextChanged.connect(self.load_data)
-        self.import_btn.clicked.connect(self.import_file)  # ✅ renamed
+        self.import_btn.clicked.connect(self.import_file)
         self.add_btn.clicked.connect(self.add_item)
 
+        self.apply_permissions()
         self.load_data()
+
+    def apply_permissions(self):
+        # Admin only can edit master data
+        can_edit_master = AppState.can_edit_master_data()
+
+        self.add_btn.setEnabled(can_edit_master)
+        self.import_btn.setEnabled(can_edit_master)
+
+        if not can_edit_master:
+            self.add_btn.setToolTip("Only Admin can add/edit items.")
+            self.import_btn.setToolTip("Only Admin can import items.")
+        else:
+            self.add_btn.setToolTip("")
+            self.import_btn.setToolTip("")
 
     def load_data(self):
         self.table.setRowCount(0)
@@ -257,7 +263,6 @@ class ItemsPage(QWidget):
                 self.table.setItem(row, 2, QTableWidgetItem(item.name))
                 self.table.setItem(row, 3, QTableWidgetItem(item.category))
 
-                # ✅ NEW
                 self.table.setItem(row, 4, QTableWidgetItem(getattr(item, "material", "") or ""))
                 self.table.setItem(row, 5, QTableWidgetItem(getattr(item, "thickness", "") or ""))
                 self.table.setItem(row, 6, QTableWidgetItem(getattr(item, "finish", "") or ""))
@@ -271,29 +276,41 @@ class ItemsPage(QWidget):
                         sqft_txt = f"{float(item.sqft_per_unit):.3f}"
                     except Exception:
                         sqft_txt = str(item.sqft_per_unit)
-
                 self.table.setItem(row, 9, QTableWidgetItem(sqft_txt))
 
     def selected_item_id(self):
         row = self.table.currentRow()
         if row < 0:
             return None
-        return int(self.table.item(row, 0).text())
+        id_item = self.table.item(row, 0)
+        if not id_item:
+            return None
+        return int(id_item.text())
 
     def open_menu(self, pos):
         item_id = self.selected_item_id()
         if not item_id:
             return
+
+        # ✅ Admin only
+        if not AppState.can_edit_master_data():
+            return
+
         menu = QMenu(self)
         edit = menu.addAction("Edit")
         delete = menu.addAction("Delete")
-        action = menu.exec(self.table.mapToGlobal(pos))
+
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if action == edit:
             self.edit_item(item_id)
         elif action == delete:
             self.delete_item(item_id)
 
     def import_file(self):
+        if not AppState.can_edit_master_data():
+            QMessageBox.warning(self, "Permission", "Only Admin can import items. ✅")
+            return
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select CSV/Excel file",
@@ -346,11 +363,9 @@ class ItemsPage(QWidget):
             self._progress_dialog.accept()
             self._progress_dialog = None
 
-        self.import_btn.setEnabled(True)
+        self.apply_permissions()
 
-        # notify
         signals.inventory_changed.emit("items")
-
         self.load_data()
 
         inserted = result.get("inserted", 0)
@@ -378,10 +393,14 @@ class ItemsPage(QWidget):
             self._progress_dialog.reject()
             self._progress_dialog = None
 
-        self.import_btn.setEnabled(True)
+        self.apply_permissions()
         QMessageBox.critical(self, "Import Error", f"Import failed:\n{err}")
 
     def add_item(self):
+        if not AppState.can_edit_master_data():
+            QMessageBox.warning(self, "Permission", "Only Admin can add items. ✅")
+            return
+
         dlg = AddEditItemDialog(self, lock_category=self.default_category)
         if dlg.exec() == QDialog.Accepted:
             try:
@@ -393,6 +412,10 @@ class ItemsPage(QWidget):
                 QMessageBox.critical(self, "Error", f"Could not save item:\n{e}")
 
     def edit_item(self, item_id):
+        if not AppState.can_edit_master_data():
+            QMessageBox.warning(self, "Permission", "Only Admin can edit items. ✅")
+            return
+
         with get_db() as db:
             ItemModel = __import__("src.db.models", fromlist=["Item"]).Item
             item = db.query(ItemModel).get(item_id)
@@ -406,8 +429,6 @@ class ItemsPage(QWidget):
                 "unit_primary": item.unit_primary,
                 "unit_secondary": item.unit_secondary,
                 "sqft_per_unit": item.sqft_per_unit,
-
-                # ✅ NEW
                 "material": getattr(item, "material", None),
                 "thickness": getattr(item, "thickness", None),
                 "finish": getattr(item, "finish", None),
@@ -424,9 +445,14 @@ class ItemsPage(QWidget):
                 QMessageBox.critical(self, "Error", f"Could not update item:\n{e}")
 
     def delete_item(self, item_id):
+        if not AppState.can_edit_master_data():
+            QMessageBox.warning(self, "Permission", "Only Admin can delete items. ✅")
+            return
+
         ok = QMessageBox.question(self, "Confirm", "Delete this item?") == QMessageBox.Yes
         if not ok:
             return
+
         with get_db() as db:
             soft_delete_item(db, item_id)
 

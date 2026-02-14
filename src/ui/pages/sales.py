@@ -7,10 +7,86 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from src.db.session import get_db
-from src.db.location_repo import get_locations   # ✅ correct import
+from src.db.location_repo import get_locations as list_locations
 from src.db.item_repo import get_items
-from src.db.sales_repo import create_sale, list_sales
+from src.db.sales_repo import create_sale, list_sales, get_sale_details
 from src.ui.signals import signals
+from src.ui.app_state import AppState
+
+
+class SaleDetailsDialog(QDialog):
+    def __init__(self, parent=None, sale_id: int | None = None):
+        super().__init__(parent)
+        self.sale_id = sale_id
+        self.setWindowTitle(f"Sale Details #{sale_id}")
+        self.setMinimumWidth(900)
+        self.setMinimumHeight(420)
+
+        layout = QVBoxLayout(self)
+
+        self.meta = QLabel("")
+        self.meta.setStyleSheet("font-size:13px;")
+        layout.addWidget(self.meta)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels([
+            "SKU", "Name", "Category",
+            "Qty Primary", "Unit P",
+            "Qty Secondary", "Unit S"
+        ])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        self.load()
+
+    def load(self):
+        with get_db() as db:
+            s = get_sale_details(db, int(self.sale_id))
+
+        if not s:
+            self.meta.setText("Not found.")
+            return
+
+        customer = s.customer_name or ""
+        loc = s.location.name if s.location else ""
+        created = str(getattr(s, "created_at", "") or "")
+        notes = getattr(s, "notes", "") or ""
+
+        self.meta.setText(
+            f"<b>Customer:</b> {customer} &nbsp;&nbsp; "
+            f"<b>Location:</b> {loc} &nbsp;&nbsp; "
+            f"<b>Created:</b> {created} &nbsp;&nbsp; "
+            f"<b>Notes:</b> {notes}"
+        )
+
+        self.table.setRowCount(0)
+        items = list(getattr(s, "items", []) or [])
+        for r, ln in enumerate(items):
+            it = ln.item
+            sku = it.sku if it else ""
+            name = it.name if it else ""
+            cat = (it.category if it else "") or ""
+
+            qp = float(ln.qty_primary or 0)
+            up = (ln.unit_primary or (it.unit_primary if it else "") or "")
+            qs = "" if ln.qty_secondary is None else str(int(ln.qty_secondary or 0))
+            us = (ln.unit_secondary or (it.unit_secondary if it else "") or "")
+
+            self.table.insertRow(r)
+            self.table.setItem(r, 0, QTableWidgetItem(sku))
+            self.table.setItem(r, 1, QTableWidgetItem(name))
+            self.table.setItem(r, 2, QTableWidgetItem(cat))
+            self.table.setItem(r, 3, QTableWidgetItem(f"{qp:.3f}"))
+            self.table.setItem(r, 4, QTableWidgetItem(up))
+            self.table.setItem(r, 5, QTableWidgetItem(qs))
+            self.table.setItem(r, 6, QTableWidgetItem(us))
 
 
 class AddSaleDialog(QDialog):
@@ -29,7 +105,7 @@ class AddSaleDialog(QDialog):
         self.loc_dd.addItem("—", None)
 
         with get_db() as db:
-            self._locations = get_locations(db)  # ✅ fixed (was list_locations)
+            self._locations = list_locations(db)
             for l in self._locations:
                 self.loc_dd.addItem(l.name, l.id)
 
@@ -40,11 +116,10 @@ class AddSaleDialog(QDialog):
         form.addRow("Location", self.loc_dd)
         layout.addLayout(form)
 
-        # rows table
         self.rows = QTableWidget(0, 5)
-        self.rows.setHorizontalHeaderLabels([
-            "Item", "Category", "Qty Secondary (slab/box)", "Qty Primary (sqft/piece)", ""
-        ])
+        self.rows.setHorizontalHeaderLabels(
+            ["Item", "Category", "Qty Secondary (slab/box)", "Qty Primary (sqft/piece)", ""]
+        )
         self.rows.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.rows)
 
@@ -87,24 +162,9 @@ class AddSaleDialog(QDialog):
         self.rows.setCellWidget(r, 3, qty_pri)
         self.rows.setCellWidget(r, 4, del_btn)
 
-        # ✅ keep one recalc handler only (prevent multi-connect issue)
-        def recalc_sqft_for_item(it):
-            if it and it.sqft_per_unit:
-                try:
-                    qty_pri.setValue(float(it.sqft_per_unit) * float(qty_sec.value()))
-                except Exception:
-                    pass
-
         def on_item_change():
             item_id = item_dd.currentData()
             it = self._items_by_id.get(item_id)
-
-            # reset
-            try:
-                qty_sec.valueChanged.disconnect()
-            except Exception:
-                pass
-
             if not it:
                 cat_lbl.setText("—")
                 qty_sec.setEnabled(True)
@@ -118,19 +178,29 @@ class AddSaleDialog(QDialog):
                 qty_sec.setEnabled(True)
                 qty_pri.setEnabled(True)
 
-                qty_sec.valueChanged.connect(lambda: recalc_sqft_for_item(it))
-                recalc_sqft_for_item(it)
+                def recalc():
+                    if it.sqft_per_unit:
+                        try:
+                            qty_pri.setValue(float(it.sqft_per_unit) * float(qty_sec.value()))
+                        except Exception:
+                            pass
 
+                # avoid stacking signals too much: disconnect safe
+                try:
+                    qty_sec.valueChanged.disconnect()
+                except Exception:
+                    pass
+                qty_sec.valueChanged.connect(recalc)
+                recalc()
             else:
                 qty_sec.setValue(0)
                 qty_sec.setEnabled(False)
                 qty_pri.setEnabled(True)
 
         def remove_row():
-            # ✅ remove correct row (not the old captured index)
-            row = self.rows.indexAt(del_btn.parentWidget().pos()).row()
-            if row >= 0:
-                self.rows.removeRow(row)
+            row_to_remove = self.rows.indexAt(del_btn.pos()).row()
+            if row_to_remove >= 0:
+                self.rows.removeRow(row_to_remove)
 
         item_dd.currentIndexChanged.connect(on_item_change)
         del_btn.clicked.connect(remove_row)
@@ -138,6 +208,10 @@ class AddSaleDialog(QDialog):
     def on_save(self):
         customer = self.customer.text().strip() or None
         location_id = self.loc_dd.currentData()
+
+        if not location_id:
+            QMessageBox.warning(self, "Missing", "Location is required.")
+            return
 
         rows_payload = []
         for r in range(self.rows.rowCount()):
@@ -155,21 +229,28 @@ class AddSaleDialog(QDialog):
 
             cat = (it.category or "").upper()
 
+            pri = float(qty_pri.value())
+            if pri <= 0:
+                continue
+
             if cat in ("SLAB", "TILE"):
+                sec = int(qty_sec.value())
+                if sec <= 0:
+                    continue
                 rows_payload.append({
                     "item_id": item_id,
-                    "qty_secondary": int(qty_sec.value()),
-                    "qty_primary": float(qty_pri.value()),
+                    "qty_secondary": sec,
+                    "qty_primary": pri,
                 })
             else:
                 rows_payload.append({
                     "item_id": item_id,
                     "qty_secondary": None,
-                    "qty_primary": float(qty_pri.value()),
+                    "qty_primary": pri,
                 })
 
         if not rows_payload:
-            QMessageBox.warning(self, "Missing", "Add at least one valid item line.")
+            QMessageBox.warning(self, "Missing", "Add at least one valid item line (qty > 0).")
             return
 
         self._data = {
@@ -213,20 +294,53 @@ class SalesPage(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.table)
 
+        # ✅ View Details on double click
+        self.table.cellDoubleClicked.connect(self.open_details)
+
+        self.apply_permissions()
         self.load_data()
+
+    def apply_permissions(self):
+        can_add = AppState.can_add_transactions()
+        self.add_btn.setEnabled(can_add)
+        self.add_btn.setToolTip("" if can_add else "Viewer role: Add Sale disabled")
 
     def load_data(self):
         self.table.setRowCount(0)
         with get_db() as db:
-            rows = list_sales(db, self.search.text().strip())
-            for r, s in enumerate(rows):
-                self.table.insertRow(r)
-                self.table.setItem(r, 0, QTableWidgetItem(str(s.id)))
-                self.table.setItem(r, 1, QTableWidgetItem(s.customer_name or ""))
-                self.table.setItem(r, 2, QTableWidgetItem(s.location.name if s.location else ""))
-                self.table.setItem(r, 3, QTableWidgetItem(str(getattr(s, "created_at", ""))))
+            rows = list_sales(db, self.search.text().strip(), limit=300)
+
+        for r, s in enumerate(rows):
+            self.table.insertRow(r)
+            self.table.setItem(r, 0, QTableWidgetItem(str(s.id)))
+            self.table.setItem(r, 1, QTableWidgetItem(s.customer_name or ""))
+            self.table.setItem(r, 2, QTableWidgetItem(s.location.name if s.location else ""))
+            self.table.setItem(r, 3, QTableWidgetItem(str(getattr(s, "created_at", ""))))
+
+    def selected_sale_id(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        try:
+            return int(self.table.item(row, 0).text())
+        except Exception:
+            return None
+
+    def open_details(self):
+        sale_id = self.selected_sale_id()
+        if not sale_id:
+            return
+        dlg = SaleDetailsDialog(self, sale_id=sale_id)
+        dlg.exec()
 
     def add_sale(self):
+        if not AppState.can_add_transactions():
+            QMessageBox.information(
+                self, "Not allowed",
+                "Viewer role can only view/export.\n\nPlease login as Admin/Staff."
+            )
+            return
+
         dlg = AddSaleDialog(self)
         if dlg.exec() == QDialog.Accepted:
             try:

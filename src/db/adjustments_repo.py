@@ -1,7 +1,8 @@
 # src/db/adjustments_repo.py
-from src.db.models import Item
-from src.db.ledger_repo import add_ledger_entry, get_stock_balance
 
+from sqlalchemy.orm import joinedload
+from src.db.models import Item, StockLedger
+from src.db.ledger_repo import add_ledger_entry, get_stock_balance
 from src.db.slab_repo import create_slab_entry
 from src.db.tile_repo import create_tile_entry
 from src.db.block_repo import create_block_entry
@@ -15,22 +16,19 @@ def _neg(v):
         return 0.0
 
 
+# =========================================================
+# SINGLE ADJUSTMENT
+# =========================================================
 def create_adjustment(
     db,
     *,
     location_id: int,
-    movement_type: str,   # ADJUST_IN / ADJUST_OUT / DAMAGE_OUT
+    movement_type: str,
     item_id: int,
     qty_primary: float,
     qty_secondary: int | None,
-    notes: str | None = None
+    notes: str | None = None,
 ):
-    """
-    Creates a stock adjustment:
-    - Adds ledger entry
-    - Updates inventory tables
-    Enforces no negative stock for OUT movements.
-    """
     if not location_id:
         raise ValueError("Location is required.")
 
@@ -39,109 +37,97 @@ def create_adjustment(
         raise ValueError("Item not found.")
 
     cat = (item.category or "").upper()
-    unit_primary = item.unit_primary or ("piece" if cat in ("BLOCK", "TABLE") else "sqft")
-    unit_secondary = item.unit_secondary
+    movement_type = movement_type.upper()
 
-    if not qty_primary or float(qty_primary) <= 0:
-        raise ValueError("Primary quantity must be > 0.")
+    allowed = (
+        "ADJUST_IN",
+        "ADJUST_OUT",
+        "DAMAGE_OUT",
+        "CORRECTION_IN",
+        "CORRECTION_OUT",
+    )
+    if movement_type not in allowed:
+        raise ValueError("Invalid movement type.")
+
+    if qty_primary <= 0:
+        raise ValueError("Primary qty must be > 0.")
 
     if cat in ("SLAB", "TILE"):
-        if qty_secondary is None or int(qty_secondary) <= 0:
-            raise ValueError(f"{cat} requires secondary qty (slab/box).")
-        qty_secondary = int(qty_secondary)
-    else:
-        qty_secondary = None
+        if not qty_secondary or qty_secondary <= 0:
+            raise ValueError("Secondary qty required.")
 
-    # OUT movements => validate stock
-    is_out = movement_type in ("ADJUST_OUT", "DAMAGE_OUT")
-    if is_out:
-        avail_primary, avail_secondary = get_stock_balance(db, item_id, location_id)
-        req_primary = float(qty_primary)
-        req_secondary = int(qty_secondary or 0)
-
-        if cat in ("BLOCK", "TABLE"):
-            if req_primary > avail_primary:
-                raise ValueError(
-                    f"Insufficient stock.\n"
-                    f"{item.sku} — {item.name}\n"
-                    f"Available: {avail_primary:.3f} {unit_primary}\n"
-                    f"Requested: {req_primary:.3f} {unit_primary}"
-                )
-        else:
-            if req_secondary > avail_secondary:
-                raise ValueError(
-                    f"Insufficient secondary stock.\n"
-                    f"{item.sku} — {item.name}\n"
-                    f"Available: {avail_secondary} {unit_secondary}\n"
-                    f"Requested: {req_secondary} {unit_secondary}"
-                )
-            if req_primary > avail_primary:
-                raise ValueError(
-                    f"Insufficient primary stock.\n"
-                    f"{item.sku} — {item.name}\n"
-                    f"Available: {avail_primary:.3f} {unit_primary}\n"
-                    f"Requested: {req_primary:.3f} {unit_primary}"
-                )
-
-    # ledger qty sign
-    led_qty_primary = float(qty_primary)
-    led_qty_secondary = qty_secondary
-
-    inv_primary = float(qty_primary)
-    inv_secondary = qty_secondary
+    is_out = movement_type.endswith("_OUT")
 
     if is_out:
-        led_qty_primary = _neg(qty_primary)
-        led_qty_secondary = -int(qty_secondary) if qty_secondary is not None else None
-        inv_primary = _neg(qty_primary)
-        inv_secondary = -int(qty_secondary) if qty_secondary is not None else None
+        avail_pri, avail_sec = get_stock_balance(db, item_id, location_id)
 
-    # ledger
+        if qty_primary > avail_pri:
+            raise ValueError("Insufficient stock.")
+
+        if cat in ("SLAB", "TILE") and qty_secondary > avail_sec:
+            raise ValueError("Insufficient secondary stock.")
+
+    led_pri = -qty_primary if is_out else qty_primary
+    led_sec = -qty_secondary if is_out and qty_secondary else qty_secondary
+
     add_ledger_entry(
         db=db,
         item_id=item_id,
         location_id=location_id,
         movement_type=movement_type,
-        qty_primary=led_qty_primary,
-        qty_secondary=led_qty_secondary,
-        unit_primary=unit_primary,
-        unit_secondary=unit_secondary,
+        qty_primary=led_pri,
+        qty_secondary=led_sec,
+        unit_primary=item.unit_primary,
+        unit_secondary=item.unit_secondary,
         ref_type="adjustment",
         ref_id=None
     )
 
-    note_text = (notes or "").strip() or movement_type
-
-    # inventory tables
-    if cat == "SLAB":
-        create_slab_entry(db, {
-            "item_id": item_id,
-            "slab_count": int(inv_secondary or 0),
-            "total_sqft": float(inv_primary or 0),
-            "location_id": location_id,
-            "notes": note_text
-        })
-    elif cat == "TILE":
-        create_tile_entry(db, {
-            "item_id": item_id,
-            "box_count": int(inv_secondary or 0),
-            "total_sqft": float(inv_primary or 0),
-            "location_id": location_id,
-            "notes": note_text
-        })
-    elif cat == "BLOCK":
-        create_block_entry(db, {
-            "item_id": item_id,
-            "piece_count": int(inv_primary or 0),
-            "location_id": location_id,
-            "notes": note_text
-        })
-    elif cat == "TABLE":
-        create_table_entry(db, {
-            "item_id": item_id,
-            "piece_count": int(inv_primary or 0),
-            "location_id": location_id,
-            "notes": note_text
-        })
-
     db.commit()
+
+
+# =========================================================
+# BATCH
+# =========================================================
+def create_adjustments_batch(db, payload: dict):
+    movement_type = payload["movement_type"]
+    location_id = payload["location_id"]
+    notes = payload.get("notes")
+
+    rows = payload.get("rows") or []
+
+    for r in rows:
+        create_adjustment(
+            db,
+            location_id=location_id,
+            movement_type=movement_type,
+            item_id=r["item_id"],
+            qty_primary=r["qty_primary"],
+            qty_secondary=r.get("qty_secondary"),
+            notes=notes,
+        )
+
+
+# =========================================================
+# LIST
+# =========================================================
+def list_adjustments(db, q_text: str = "", limit: int = 300):
+    q = (
+        db.query(StockLedger)
+        .options(
+            joinedload(StockLedger.item),
+            joinedload(StockLedger.location)
+        )
+        .filter(StockLedger.ref_type == "adjustment")
+        .order_by(StockLedger.id.desc())
+    )
+
+    if q_text:
+        like = f"%{q_text}%"
+        q = q.join(Item).filter(
+            (StockLedger.movement_type.ilike(like)) |
+            (Item.sku.ilike(like)) |
+            (Item.name.ilike(like))
+        )
+
+    return q.limit(limit).all()

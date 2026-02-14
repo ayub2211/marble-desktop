@@ -18,7 +18,7 @@ def _clean_text(v):
 def _validate_purchase_rows_or_raise(db, location_id: int | None, rows: list[dict]):
     """
     Purchase rules:
-    - location_id REQUIRED (because you are doing location-wise stock)
+    - location_id REQUIRED (location-wise stock)
     - each row must have item_id
     - qty_primary > 0 always
     - for SLAB/TILE qty_secondary > 0 required
@@ -60,7 +60,6 @@ def _validate_purchase_rows_or_raise(db, location_id: int | None, rows: list[dic
             if sec <= 0:
                 raise ValueError(f"{cat} requires secondary qty (slab/box) for {item.sku} — {item.name}")
         else:
-            # BLOCK/TABLE
             r["qty_secondary"] = None
 
 
@@ -82,7 +81,6 @@ def create_purchase(db, payload: dict) -> Purchase:
     rows = payload.get("rows") or []
     _validate_purchase_rows_or_raise(db, location_id, rows)
 
-    # ✅ create header
     p = Purchase(
         vendor_name=vendor_name,
         location_id=location_id,
@@ -91,20 +89,18 @@ def create_purchase(db, payload: dict) -> Purchase:
     db.add(p)
     db.flush()  # get p.id
 
-    # ✅ insert lines + ledger + inventory
     for r in rows:
         item = db.query(Item).get(r["item_id"])
         cat = (item.category or "").upper()
 
         unit_primary = item.unit_primary or ("piece" if cat in ("BLOCK", "TABLE") else "sqft")
-        unit_secondary = item.unit_secondary  # slab/box or None
+        unit_secondary = item.unit_secondary
 
         qty_primary = float(r.get("qty_primary") or 0)
         qty_secondary = r.get("qty_secondary")
         if qty_secondary is not None:
             qty_secondary = int(qty_secondary or 0)
 
-        # purchase line
         db.add(PurchaseItem(
             purchase_id=p.id,
             item_id=item.id,
@@ -114,7 +110,6 @@ def create_purchase(db, payload: dict) -> Purchase:
             unit_secondary=unit_secondary
         ))
 
-        # ledger entry (+)
         add_ledger_entry(
             db=db,
             item_id=item.id,
@@ -130,7 +125,6 @@ def create_purchase(db, payload: dict) -> Purchase:
 
         note_text = f"Purchase#{p.id}" + (f" — {vendor_name}" if vendor_name else "")
 
-        # inventory tables (+)
         if cat == "SLAB":
             create_slab_entry(db, {
                 "item_id": item.id,
@@ -177,3 +171,15 @@ def list_purchases(db, q_text: str = ""):
         like = f"%{q_text}%"
         q = q.filter(Purchase.vendor_name.ilike(like))
     return q.all()
+
+
+def get_purchase_details(db, purchase_id: int):
+    return (
+        db.query(Purchase)
+        .options(
+            joinedload(Purchase.location),
+            joinedload(Purchase.items).joinedload(PurchaseItem.item)
+        )
+        .filter(Purchase.id == purchase_id)
+        .first()
+    )
