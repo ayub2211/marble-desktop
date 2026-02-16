@@ -2,152 +2,32 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QTableWidget, QTableWidgetItem, QDialog, QFormLayout, QMessageBox,
-    QComboBox, QSpinBox, QDoubleSpinBox, QTabWidget
+    QComboBox, QSpinBox, QDoubleSpinBox, QTabWidget, QMenu
 )
 from PySide6.QtCore import Qt
 
 from src.db.session import get_db
-from src.db.location_repo import get_locations as list_locations
+from src.db.location_repo import list_locations
 from src.db.item_repo import get_items
 from src.db.returns_repo import (
     create_return,
-    list_returns,
-    get_sale_return_details,
-    get_purchase_return_details
+    list_sale_returns, list_purchase_returns,
+    get_sale_return_details, get_purchase_return_details,
+    cancel_sale_return, cancel_purchase_return,
 )
 from src.ui.signals import signals
 from src.ui.app_state import AppState
 
 
-# ---------- helpers (dict + ORM safe) ----------
 def _get(obj, key, default=None):
+    # supports ORM + dict mixed
+    if obj is None:
+        return default
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
 
 
-def _get_location_name(ret):
-    # dict forms: location_name OR location (nested) OR location_id only
-    if isinstance(ret, dict):
-        if ret.get("location_name"):
-            return ret.get("location_name") or ""
-        loc = ret.get("location")
-        if isinstance(loc, dict):
-            return loc.get("name") or ""
-        return ""
-    # ORM form
-    loc = getattr(ret, "location", None)
-    return (loc.name if loc else "") or ""
-
-
-def _get_party(ret, rtype: str):
-    # dict can have party_name, customer_name, vendor_name
-    if isinstance(ret, dict):
-        if ret.get("party_name"):
-            return ret.get("party_name") or ""
-        if rtype == "SALE_RETURN":
-            return ret.get("customer_name") or ""
-        return ret.get("vendor_name") or ""
-    # ORM
-    if rtype == "SALE_RETURN":
-        return getattr(ret, "customer_name", "") or getattr(ret, "party_name", "") or ""
-    return getattr(ret, "vendor_name", "") or getattr(ret, "party_name", "") or ""
-
-
-def _get_created(ret):
-    # dict key might be created_at / created
-    if isinstance(ret, dict):
-        return str(ret.get("created_at") or ret.get("created") or "")
-    return str(getattr(ret, "created_at", "") or "")
-
-
-# ---------- Details Dialog ----------
-class ReturnDetailsDialog(QDialog):
-    def __init__(self, parent=None, return_type: str = "SALE_RETURN", return_id: int | None = None):
-        super().__init__(parent)
-        self.return_type = (return_type or "").strip().upper()
-        self.return_id = return_id
-
-        self.setWindowTitle(f"Return Details — {self.return_type} #{return_id}" if return_id else "Return Details")
-        self.setMinimumWidth(920)
-
-        layout = QVBoxLayout(self)
-
-        self.header = QLabel("")
-        self.header.setStyleSheet("font-size:13px;font-weight:700;")
-        layout.addWidget(self.header)
-
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels([
-            "SKU", "Item", "Category",
-            "Qty Primary", "Unit P",
-            "Qty Secondary", "Unit S"
-        ])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
-
-        self.load()
-
-    def load(self):
-        self.table.setRowCount(0)
-        if not self.return_id:
-            return
-
-        with get_db() as db:
-            if self.return_type == "SALE_RETURN":
-                ret = get_sale_return_details(db, int(self.return_id))
-            else:
-                ret = get_purchase_return_details(db, int(self.return_id))
-
-        if not ret:
-            self.header.setText("Return not found.")
-            return
-
-        loc = _get_location_name(ret)
-        created = _get_created(ret)
-        notes = (_get(ret, "notes", "") or "").strip()
-
-        if self.return_type == "SALE_RETURN":
-            party = _get(ret, "customer_name", "") or _get(ret, "party_name", "") or ""
-        else:
-            party = _get(ret, "vendor_name", "") or _get(ret, "party_name", "") or ""
-
-        head = f"<b>Type:</b> {self.return_type} &nbsp;&nbsp; <b>Party:</b> {party} &nbsp;&nbsp; <b>Location:</b> {loc} &nbsp;&nbsp; <b>Created:</b> {created}"
-        if notes:
-            head += f"<br><b>Notes:</b> {notes}"
-        self.header.setText(head)
-
-        lines = _get(ret, "items", []) or []
-        for r, line in enumerate(lines):
-            it = _get(line, "item", None)
-            sku = _get(it, "sku", "") if it else ""
-            name = _get(it, "name", "") if it else ""
-            cat = (_get(it, "category", "") or "").upper()
-
-            qp = float(_get(line, "qty_primary", 0) or 0)
-            qs = _get(line, "qty_secondary", None)
-
-            up = _get(line, "unit_primary", "") or (_get(it, "unit_primary", "") if it else "")
-            us = _get(line, "unit_secondary", "") or (_get(it, "unit_secondary", "") if it else "")
-
-            self.table.insertRow(r)
-            self.table.setItem(r, 0, QTableWidgetItem(str(sku)))
-            self.table.setItem(r, 1, QTableWidgetItem(str(name)))
-            self.table.setItem(r, 2, QTableWidgetItem(str(cat)))
-            self.table.setItem(r, 3, QTableWidgetItem(f"{qp:.3f}"))
-            self.table.setItem(r, 4, QTableWidgetItem(str(up or "")))
-            self.table.setItem(r, 5, QTableWidgetItem("" if qs is None else str(int(qs))))
-            self.table.setItem(r, 6, QTableWidgetItem(str(us or "")))
-
-
-# ---------- Add Dialog ----------
 class AddReturnDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -264,7 +144,7 @@ class AddReturnDialog(QDialog):
         del_btn.clicked.connect(remove_row)
 
     def on_save(self):
-        return_type = self.return_type.currentText().strip().upper()
+        return_type = self.return_type.currentText()
         party = self.party.text().strip() or None
         location_id = self.loc_dd.currentData()
 
@@ -287,38 +167,22 @@ class AddReturnDialog(QDialog):
                 continue
 
             cat = (it.category or "").upper()
-
             if cat in ("SLAB", "TILE"):
-                rows_payload.append({
-                    "item_id": item_id,
-                    "qty_secondary": int(qty_sec.value()),
-                    "qty_primary": float(qty_pri.value()),
-                })
+                rows_payload.append({"item_id": item_id, "qty_secondary": int(qty_sec.value()), "qty_primary": float(qty_pri.value())})
             else:
-                rows_payload.append({
-                    "item_id": item_id,
-                    "qty_secondary": None,
-                    "qty_primary": float(qty_pri.value()),
-                })
+                rows_payload.append({"item_id": item_id, "qty_secondary": None, "qty_primary": float(qty_pri.value())})
 
         if not rows_payload:
             QMessageBox.warning(self, "Missing", "Add at least one valid item line.")
             return
 
-        payload = {
+        self._data = {
             "return_type": return_type,
+            "party_name": party,
             "location_id": location_id,
             "notes": None,
             "rows": rows_payload
         }
-
-        # repo expects customer_name/vendor_name
-        if return_type == "SALE_RETURN":
-            payload["customer_name"] = party
-        else:
-            payload["vendor_name"] = party
-
-        self._data = payload
         self.accept()
 
     @property
@@ -326,7 +190,105 @@ class AddReturnDialog(QDialog):
         return getattr(self, "_data", None)
 
 
-# ---------- Page ----------
+class ReturnDetailsDialog(QDialog):
+    def __init__(self, parent, return_type: str, return_id: int):
+        super().__init__(parent)
+        self.return_type = (return_type or "").upper()
+        self.return_id = int(return_id)
+
+        self.setWindowTitle(f"Return Details — {self.return_type} #{self.return_id}")
+        self.setMinimumWidth(940)
+        self.setMinimumHeight(520)
+
+        layout = QVBoxLayout(self)
+
+        self.header = QLabel("")
+        self.header.setStyleSheet("font-size:13px;font-weight:700;")
+        layout.addWidget(self.header)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["SKU", "Item", "Category", "Qty Primary", "Unit P", "Qty Secondary", "Unit S"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        btns = QHBoxLayout()
+        self.cancel_btn = QPushButton("Cancel Transaction")
+        self.close_btn = QPushButton("Close")
+        btns.addWidget(self.cancel_btn)
+        btns.addStretch()
+        btns.addWidget(self.close_btn)
+        layout.addLayout(btns)
+
+        self.close_btn.clicked.connect(self.reject)
+        self.cancel_btn.clicked.connect(self.cancel_txn)
+
+        self.cancel_btn.setEnabled(AppState.can_add_transactions())
+        self._ret = None
+        self.load()
+
+    def load(self):
+        with get_db() as db:
+            if self.return_type == "SALE_RETURN":
+                ret = get_sale_return_details(db, self.return_id)
+                party = _get(ret, "customer_name", "")
+            else:
+                ret = get_purchase_return_details(db, self.return_id)
+                party = _get(ret, "vendor_name", "")
+
+        if not ret:
+            QMessageBox.warning(self, "Missing", "Return not found.")
+            self.reject()
+            return
+
+        self._ret = ret
+        loc = _get(ret, "location", None)
+        self.header.setText(
+            f"Type: {self.return_type}    "
+            f"Party: {party or ''}    "
+            f"Location: {(loc.name if loc else '')}    "
+            f"Created: {_get(ret, 'created_at', '')}    "
+            f"Notes: {_get(ret, 'notes', '') or ''}"
+        )
+
+        self.table.setRowCount(0)
+        for r, li in enumerate(_get(ret, "items", []) or []):
+            it = _get(li, "item", None)
+            sku = _get(it, "sku", "")
+            name = _get(it, "name", "")
+            cat = (_get(it, "category", "") or "")
+
+            self.table.insertRow(r)
+            self.table.setItem(r, 0, QTableWidgetItem(str(sku)))
+            self.table.setItem(r, 1, QTableWidgetItem(str(name)))
+            self.table.setItem(r, 2, QTableWidgetItem(str(cat)))
+            self.table.setItem(r, 3, QTableWidgetItem(f"{float(_get(li,'qty_primary',0) or 0):.3f}"))
+            self.table.setItem(r, 4, QTableWidgetItem(str(_get(li,'unit_primary','') or "")))
+            self.table.setItem(r, 5, QTableWidgetItem("" if _get(li,'qty_secondary',None) is None else str(int(_get(li,'qty_secondary',0) or 0))))
+            self.table.setItem(r, 6, QTableWidgetItem(str(_get(li,'unit_secondary','') or "")))
+
+    def cancel_txn(self):
+        if not AppState.can_add_transactions():
+            QMessageBox.information(self, "Permission", "Viewer cannot cancel.")
+            return
+
+        ok = QMessageBox.question(self, "Confirm", "Cancel this Return? Stock will be reversed.") == QMessageBox.Yes
+        if not ok:
+            return
+
+        try:
+            with get_db() as db:
+                if self.return_type == "SALE_RETURN":
+                    cancel_sale_return(db, self.return_id, reason="UI Cancel")
+                else:
+                    cancel_purchase_return(db, self.return_id, reason="UI Cancel")
+
+            signals.inventory_changed.emit("all")
+            QMessageBox.information(self, "Done", "Return cancelled ✅")
+            self.load()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+
 class ReturnsPage(QWidget):
     def __init__(self):
         super().__init__()
@@ -352,25 +314,25 @@ class ReturnsPage(QWidget):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        # SALE_RETURN tab
+        # Sale Returns
         self.sale_table = QTableWidget(0, 5)
         self.sale_table.setHorizontalHeaderLabels(["ID", "Party", "Location", "Created", "Ref"])
         self.sale_table.setColumnHidden(0, True)
         self.sale_table.horizontalHeader().setStretchLastSection(True)
-        self.sale_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.sale_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.sale_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.sale_table.customContextMenuRequested.connect(lambda pos: self.open_menu(self.sale_table, "SALE_RETURN", pos))
         self.sale_table.cellDoubleClicked.connect(lambda *_: self.open_details("SALE_RETURN"))
         self.tabs.addTab(self.sale_table, "Sale Returns")
 
-        # PURCHASE_RETURN tab
-        self.purchase_table = QTableWidget(0, 5)
-        self.purchase_table.setHorizontalHeaderLabels(["ID", "Party", "Location", "Created", "Ref"])
-        self.purchase_table.setColumnHidden(0, True)
-        self.purchase_table.horizontalHeader().setStretchLastSection(True)
-        self.purchase_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.purchase_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.purchase_table.cellDoubleClicked.connect(lambda *_: self.open_details("PURCHASE_RETURN"))
-        self.tabs.addTab(self.purchase_table, "Purchase Returns")
+        # Purchase Returns
+        self.pur_table = QTableWidget(0, 5)
+        self.pur_table.setHorizontalHeaderLabels(["ID", "Party", "Location", "Created", "Ref"])
+        self.pur_table.setColumnHidden(0, True)
+        self.pur_table.horizontalHeader().setStretchLastSection(True)
+        self.pur_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.pur_table.customContextMenuRequested.connect(lambda pos: self.open_menu(self.pur_table, "PURCHASE_RETURN", pos))
+        self.pur_table.cellDoubleClicked.connect(lambda *_: self.open_details("PURCHASE_RETURN"))
+        self.tabs.addTab(self.pur_table, "Purchase Returns")
 
         self.apply_permissions()
         self.load_data()
@@ -378,69 +340,72 @@ class ReturnsPage(QWidget):
     def apply_permissions(self):
         can_add = AppState.can_add_transactions()
         self.add_btn.setEnabled(can_add)
-        self.add_btn.setToolTip("" if can_add else "Viewer role: Add Return disabled")
+        self.add_btn.setToolTip("" if can_add else "Viewer role: Adding returns is disabled.")
 
     def load_data(self):
         q = self.search.text().strip()
 
         self.sale_table.setRowCount(0)
-        self.purchase_table.setRowCount(0)
+        self.pur_table.setRowCount(0)
 
         with get_db() as db:
-            sale_rows = list_returns(db, q_text=q, return_type="SALE_RETURN", limit=300) or []
-            pur_rows = list_returns(db, q_text=q, return_type="PURCHASE_RETURN", limit=300) or []
+            sale_rows = list_sale_returns(db, q_text=q) or []
+            pur_rows = list_purchase_returns(db, q_text=q) or []
 
-        # ---- SALE_RETURN list (dict OR ORM safe) ----
         for r, ret in enumerate(sale_rows):
-            rid = _get(ret, "id", None)
-            party = _get_party(ret, "SALE_RETURN")
-            loc = _get_location_name(ret)
-            created = _get_created(ret)
-
             self.sale_table.insertRow(r)
-            self.sale_table.setItem(r, 0, QTableWidgetItem("" if rid is None else str(rid)))
-            self.sale_table.setItem(r, 1, QTableWidgetItem(party))
-            self.sale_table.setItem(r, 2, QTableWidgetItem(loc))
-            self.sale_table.setItem(r, 3, QTableWidgetItem(created))
-            self.sale_table.setItem(r, 4, QTableWidgetItem("" if rid is None else f"sale_return#{rid}"))
+            self.sale_table.setItem(r, 0, QTableWidgetItem(str(_get(ret, "id", ""))))
+            self.sale_table.setItem(r, 1, QTableWidgetItem(str(_get(ret, "customer_name", "") or "")))
+            loc = _get(ret, "location", None)
+            self.sale_table.setItem(r, 2, QTableWidgetItem(loc.name if loc else ""))
+            self.sale_table.setItem(r, 3, QTableWidgetItem(str(_get(ret, "created_at", "") or "")))
+            self.sale_table.setItem(r, 4, QTableWidgetItem(f"sale_return#{_get(ret,'id','')}"))
 
-        # ---- PURCHASE_RETURN list (dict OR ORM safe) ----
         for r, ret in enumerate(pur_rows):
-            rid = _get(ret, "id", None)
-            party = _get_party(ret, "PURCHASE_RETURN")
-            loc = _get_location_name(ret)
-            created = _get_created(ret)
+            self.pur_table.insertRow(r)
+            self.pur_table.setItem(r, 0, QTableWidgetItem(str(_get(ret, "id", ""))))
+            self.pur_table.setItem(r, 1, QTableWidgetItem(str(_get(ret, "vendor_name", "") or "")))
+            loc = _get(ret, "location", None)
+            self.pur_table.setItem(r, 2, QTableWidgetItem(loc.name if loc else ""))
+            self.pur_table.setItem(r, 3, QTableWidgetItem(str(_get(ret, "created_at", "") or "")))
+            self.pur_table.setItem(r, 4, QTableWidgetItem(f"purchase_return#{_get(ret,'id','')}"))
 
-            self.purchase_table.insertRow(r)
-            self.purchase_table.setItem(r, 0, QTableWidgetItem("" if rid is None else str(rid)))
-            self.purchase_table.setItem(r, 1, QTableWidgetItem(party))
-            self.purchase_table.setItem(r, 2, QTableWidgetItem(loc))
-            self.purchase_table.setItem(r, 3, QTableWidgetItem(created))
-            self.purchase_table.setItem(r, 4, QTableWidgetItem("" if rid is None else f"purchase_return#{rid}"))
-
-    def _selected_id(self, table: QTableWidget):
+    def selected_id(self, table: QTableWidget):
         row = table.currentRow()
         if row < 0:
             return None
-        try:
-            v = (table.item(row, 0).text() or "").strip()
-            return int(v) if v else None
-        except Exception:
-            return None
+        return int(table.item(row, 0).text())
 
-    def open_details(self, rtype: str):
-        table = self.sale_table if rtype == "SALE_RETURN" else self.purchase_table
-        rid = self._selected_id(table)
+    def open_details(self, return_type: str):
+        table = self.sale_table if return_type == "SALE_RETURN" else self.pur_table
+        rid = self.selected_id(table)
         if not rid:
             return
-        ReturnDetailsDialog(self, return_type=rtype, return_id=rid).exec()
+        dlg = ReturnDetailsDialog(self, return_type, rid)
+        dlg.exec()
+
+    def open_menu(self, table: QTableWidget, return_type: str, pos):
+        rid = self.selected_id(table)
+        if not rid:
+            return
+
+        menu = QMenu(self)
+        view = menu.addAction("View Details")
+
+        cancel_action = None
+        if AppState.can_add_transactions():
+            cancel_action = menu.addAction("Cancel Transaction")
+
+        action = menu.exec(table.mapToGlobal(pos))
+        if action == view:
+            self.open_details(return_type)
+        elif cancel_action and action == cancel_action:
+            dlg = ReturnDetailsDialog(self, return_type, rid)
+            dlg.cancel_txn()
 
     def add_return(self):
         if not AppState.can_add_transactions():
-            QMessageBox.information(
-                self, "Permission",
-                "Viewer role: You can only view/export.\n\nPlease login as Admin/Staff."
-            )
+            QMessageBox.information(self, "Permission", "Viewer role: You can only view/export.")
             return
 
         dlg = AddReturnDialog(self)

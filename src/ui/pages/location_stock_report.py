@@ -553,3 +553,15 @@ class LocationStockReportPage(QWidget):
              .replace(">", "&gt;")
              .replace('"', "&quot;")
         )
+    def _set_cell(table, row, col, text, bold=False, dim=False, negative=False):
+        from PySide6.QtGui import QFont, QColor
+        item = QTableWidgetItem(str(text))
+        if bold:
+            f = item.font()
+            f.setBold(True)
+            item.setFont(f)
+        if dim:
+            item.setForeground(QColor(160, 160, 160))
+        if negative:
+            item.setForeground(QColor(220, 80, 80))
+        table.setItem(row, col, item)

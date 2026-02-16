@@ -1,94 +1,175 @@
 # src/ui/pages/sales.py
+from __future__ import annotations
+
+from datetime import datetime
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QDialog, QFormLayout, QLineEdit,
-    QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox
+    QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPdfWriter, QPainter, QFont, QPageSize
 
 from src.db.session import get_db
 from src.db.location_repo import get_locations as list_locations
 from src.db.item_repo import get_items
-from src.db.sales_repo import create_sale, list_sales, get_sale_details
+from src.db.sales_repo import create_sale, list_sales, get_sale_details, cancel_sale
 from src.ui.signals import signals
 from src.ui.app_state import AppState
 
 
-class SaleDetailsDialog(QDialog):
-    def __init__(self, parent=None, sale_id: int | None = None):
-        super().__init__(parent)
-        self.sale_id = sale_id
-        self.setWindowTitle(f"Sale Details #{sale_id}")
-        self.setMinimumWidth(900)
-        self.setMinimumHeight(420)
-
-        layout = QVBoxLayout(self)
-
-        self.meta = QLabel("")
-        self.meta.setStyleSheet("font-size:13px;")
-        layout.addWidget(self.meta)
-
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels([
-            "SKU", "Name", "Category",
-            "Qty Primary", "Unit P",
-            "Qty Secondary", "Unit S"
-        ])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table, 1)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
-
-        self.load()
-
-    def load(self):
-        with get_db() as db:
-            s = get_sale_details(db, int(self.sale_id))
-
-        if not s:
-            self.meta.setText("Not found.")
-            return
-
-        customer = s.customer_name or ""
-        loc = s.location.name if s.location else ""
-        created = str(getattr(s, "created_at", "") or "")
-        notes = getattr(s, "notes", "") or ""
-
-        self.meta.setText(
-            f"<b>Customer:</b> {customer} &nbsp;&nbsp; "
-            f"<b>Location:</b> {loc} &nbsp;&nbsp; "
-            f"<b>Created:</b> {created} &nbsp;&nbsp; "
-            f"<b>Notes:</b> {notes}"
-        )
-
-        self.table.setRowCount(0)
-        items = list(getattr(s, "items", []) or [])
-        for r, ln in enumerate(items):
-            it = ln.item
-            sku = it.sku if it else ""
-            name = it.name if it else ""
-            cat = (it.category if it else "") or ""
-
-            qp = float(ln.qty_primary or 0)
-            up = (ln.unit_primary or (it.unit_primary if it else "") or "")
-            qs = "" if ln.qty_secondary is None else str(int(ln.qty_secondary or 0))
-            us = (ln.unit_secondary or (it.unit_secondary if it else "") or "")
-
-            self.table.insertRow(r)
-            self.table.setItem(r, 0, QTableWidgetItem(sku))
-            self.table.setItem(r, 1, QTableWidgetItem(name))
-            self.table.setItem(r, 2, QTableWidgetItem(cat))
-            self.table.setItem(r, 3, QTableWidgetItem(f"{qp:.3f}"))
-            self.table.setItem(r, 4, QTableWidgetItem(up))
-            self.table.setItem(r, 5, QTableWidgetItem(qs))
-            self.table.setItem(r, 6, QTableWidgetItem(us))
+# -------------------- PDF (Qt Native) --------------------
+def _fmt_dt(v) -> str:
+    if not v:
+        return ""
+    return str(v)
 
 
+def export_sale_pdf(parent, sale_obj, out_path: str):
+    """
+    Qt-native PDF export (auto-fit columns + no cutting).
+    """
+    writer = QPdfWriter(out_path)
+    writer.setPageSize(QPageSize(QPageSize.A4))
+    writer.setTitle(f"Sale Invoice #{sale_obj.id}")
+
+    p = QPainter(writer)
+    try:
+        page_w = writer.width()
+        page_h = writer.height()
+        margin = 650
+        x = margin
+        y = margin
+
+        def set_font(size=12, bold=False):
+            f = QFont("Arial", size)
+            f.setBold(bold)
+            p.setFont(f)
+
+        def draw_text(tx, ty, text):
+            p.drawText(tx, ty, text)
+
+        # ---- Header ----
+        set_font(18, True)
+        draw_text(x, y, "Marble Inventory")
+        set_font(12, False)
+        y += 420
+        draw_text(x, y, "Sales Invoice")
+
+        # right meta
+        set_font(10, False)
+        right_x = page_w - margin - 3200
+        draw_text(right_x, y - 200, f"Invoice #: {sale_obj.id}")
+        draw_text(right_x, y + 250, f"Date: {_fmt_dt(getattr(sale_obj, 'created_at', ''))}")
+
+        y += 650
+
+        # Party + location + notes
+        set_font(11, True)
+        draw_text(x, y, f"Customer: {sale_obj.customer_name or ''}")
+        y += 320
+        set_font(11, False)
+        draw_text(x, y, f"Location: {sale_obj.location.name if sale_obj.location else ''}")
+        y += 320
+        notes = getattr(sale_obj, "notes", None) or ""
+        draw_text(x, y, f"Notes: {notes}")
+        y += 550
+
+        # ---- Table ----
+        # IMPORTANT: widths are now "relative weights" (auto-fit to page width)
+        cols = [
+            ("SKU", 12),
+            ("Item", 38),
+            ("Cat", 12),
+            ("Qty P", 10),
+            ("Unit P", 8),
+            ("Qty S", 10),
+            ("Unit S", 10),
+        ]
+
+        available_w = page_w - (2 * margin)
+        total_weight = sum(w for _, w in cols)
+        col_widths = [int(available_w * (w / total_weight)) for _, w in cols]
+
+        row_h = 420
+        header_h = 430
+
+        def draw_row(row_y, values, is_header=False):
+            cx = x
+            if is_header:
+                set_font(10, True)
+            else:
+                set_font(10, False)
+
+            for i, val in enumerate(values):
+                w = col_widths[i]
+                p.drawRect(cx, row_y, w, row_h)
+
+                # text padding
+                pad = 120
+                text_rect_x = cx + pad
+                text_rect_y = row_y + 70
+                text_rect_w = max(50, w - (2 * pad))
+                text_rect_h = row_h - 140
+
+                # Elide long text (prevents cutting)
+                txt = str(val)
+                fm = p.fontMetrics()
+                txt = fm.elidedText(txt, Qt.ElideRight, text_rect_w)
+
+                p.drawText(text_rect_x, row_y + 280, txt)
+
+                cx += w
+
+        # header
+        draw_row(y, [c[0] for c in cols], is_header=True)
+        y += row_h
+
+        total_primary = 0.0
+        total_secondary = 0
+
+        items = list(getattr(sale_obj, "items", []) or [])
+        for it in items:
+            sku = it.item.sku if it.item else ""
+            name = it.item.name if it.item else ""
+            cat = (it.item.category or "") if it.item else ""
+            qty_p = float(it.qty_primary or 0)
+            unit_p = it.unit_primary or ""
+            qty_s = "" if it.qty_secondary is None else str(int(it.qty_secondary or 0))
+            unit_s = it.unit_secondary or ""
+
+            total_primary += qty_p
+            if it.qty_secondary is not None:
+                total_secondary += int(it.qty_secondary or 0)
+
+            draw_row(
+                y,
+                [sku, name, cat, f"{qty_p:.3f}", unit_p, qty_s, unit_s],
+                is_header=False
+            )
+            y += row_h
+
+            # page break
+            if y > page_h - margin - 1200:
+                writer.newPage()
+                y = margin
+                draw_row(y, [c[0] for c in cols], is_header=True)
+                y += row_h
+
+        # totals
+        y += 500
+        set_font(11, True)
+        draw_text(x, y, f"Total Primary: {total_primary:.3f}")
+        y += 320
+        draw_text(x, y, f"Total Secondary: {total_secondary}")
+
+    finally:
+        p.end()
+
+
+
+# -------------------- UI --------------------
 class AddSaleDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -185,7 +266,6 @@ class AddSaleDialog(QDialog):
                         except Exception:
                             pass
 
-                # avoid stacking signals too much: disconnect safe
                 try:
                     qty_sec.valueChanged.disconnect()
                 except Exception:
@@ -228,8 +308,8 @@ class AddSaleDialog(QDialog):
                 continue
 
             cat = (it.category or "").upper()
-
             pri = float(qty_pri.value())
+
             if pri <= 0:
                 continue
 
@@ -237,17 +317,9 @@ class AddSaleDialog(QDialog):
                 sec = int(qty_sec.value())
                 if sec <= 0:
                     continue
-                rows_payload.append({
-                    "item_id": item_id,
-                    "qty_secondary": sec,
-                    "qty_primary": pri,
-                })
+                rows_payload.append({"item_id": item_id, "qty_secondary": sec, "qty_primary": pri})
             else:
-                rows_payload.append({
-                    "item_id": item_id,
-                    "qty_secondary": None,
-                    "qty_primary": pri,
-                })
+                rows_payload.append({"item_id": item_id, "qty_secondary": None, "qty_primary": pri})
 
         if not rows_payload:
             QMessageBox.warning(self, "Missing", "Add at least one valid item line (qty > 0).")
@@ -264,6 +336,117 @@ class AddSaleDialog(QDialog):
     @property
     def data(self):
         return getattr(self, "_data", None)
+
+
+class SaleDetailsDialog(QDialog):
+    def __init__(self, parent, sale_id: int):
+        super().__init__(parent)
+        self.sale_id = int(sale_id)
+        self.setWindowTitle(f"Sale #{self.sale_id} — Details")
+        self.setMinimumWidth(920)
+        self.setMinimumHeight(520)
+
+        layout = QVBoxLayout(self)
+
+        with get_db() as db:
+            self.sale = get_sale_details(db, self.sale_id)
+
+        if not self.sale:
+            QMessageBox.warning(self, "Not found", "Sale not found.")
+            self.reject()
+            return
+
+        header = QLabel(
+            f"<b>Customer:</b> {self.sale.customer_name or ''} &nbsp;&nbsp; "
+            f"<b>Location:</b> {(self.sale.location.name if self.sale.location else '')} &nbsp;&nbsp; "
+            f"<b>Created:</b> {_fmt_dt(getattr(self.sale, 'created_at', ''))} &nbsp;&nbsp; "
+            f"<b>Notes:</b> {getattr(self.sale, 'notes', '') or ''}"
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["SKU", "Item", "Category", "Qty Primary", "Unit P", "Qty Secondary", "Unit S"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        self._fill()
+
+        btns = QHBoxLayout()
+        self.pdf_btn = QPushButton("Save PDF")
+        self.cancel_btn = QPushButton("Cancel Transaction")
+        self.close_btn = QPushButton("Close")
+        btns.addWidget(self.pdf_btn)
+        btns.addWidget(self.cancel_btn)
+        btns.addStretch()
+        btns.addWidget(self.close_btn)
+        layout.addLayout(btns)
+
+        self.close_btn.clicked.connect(self.reject)
+        self.pdf_btn.clicked.connect(self.save_pdf)
+        self.cancel_btn.clicked.connect(self.cancel_txn)
+
+        # permissions
+        if not AppState.can_add_transactions():
+            self.cancel_btn.setEnabled(False)
+            self.cancel_btn.setToolTip("Viewer role: Cancel disabled")
+
+    def _fill(self):
+        items = list(getattr(self.sale, "items", []) or [])
+        self.table.setRowCount(0)
+        for r, it in enumerate(items):
+            self.table.insertRow(r)
+            sku = it.item.sku if it.item else ""
+            name = it.item.name if it.item else ""
+            cat = (it.item.category or "") if it.item else ""
+            qty_p = float(it.qty_primary or 0)
+            unit_p = it.unit_primary or ""
+            qty_s = "" if it.qty_secondary is None else str(int(it.qty_secondary or 0))
+            unit_s = it.unit_secondary or ""
+
+            self.table.setItem(r, 0, QTableWidgetItem(sku))
+            self.table.setItem(r, 1, QTableWidgetItem(name))
+            self.table.setItem(r, 2, QTableWidgetItem(str(cat)))
+            self.table.setItem(r, 3, QTableWidgetItem(f"{qty_p:.3f}"))
+            self.table.setItem(r, 4, QTableWidgetItem(unit_p))
+            self.table.setItem(r, 5, QTableWidgetItem(qty_s))
+            self.table.setItem(r, 6, QTableWidgetItem(unit_s))
+
+    def save_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Sale Invoice PDF", f"sale_{self.sale_id}.pdf", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+        try:
+            export_sale_pdf(self, self.sale, path)
+            QMessageBox.information(self, "Saved", f"PDF saved:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"PDF failed:\n{e}")
+
+    def cancel_txn(self):
+        if not AppState.can_add_transactions():
+            QMessageBox.information(self, "Not allowed", "Viewer role: you can only view/export.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Cancel Sale",
+            "This will reverse stock using a cancellation entry.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        try:
+            with get_db() as db:
+                cancel_sale(db, self.sale_id)
+
+            signals.inventory_changed.emit("all")
+            QMessageBox.information(self, "Done", "Sale cancelled (reversed) ✅")
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Cancel failed:\n{e}")
 
 
 class SalesPage(QWidget):
@@ -292,11 +475,10 @@ class SalesPage(QWidget):
         self.table.setHorizontalHeaderLabels(["ID", "Customer", "Location", "Created"])
         self.table.setColumnHidden(0, True)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.cellDoubleClicked.connect(self.open_details)
         layout.addWidget(self.table)
 
-        # ✅ View Details on double click
-        self.table.cellDoubleClicked.connect(self.open_details)
-
+        self._rows = []
         self.apply_permissions()
         self.load_data()
 
@@ -308,7 +490,8 @@ class SalesPage(QWidget):
     def load_data(self):
         self.table.setRowCount(0)
         with get_db() as db:
-            rows = list_sales(db, self.search.text().strip(), limit=300)
+            rows = list_sales(db, self.search.text().strip())
+        self._rows = rows
 
         for r, s in enumerate(rows):
             self.table.insertRow(r)
@@ -317,21 +500,11 @@ class SalesPage(QWidget):
             self.table.setItem(r, 2, QTableWidgetItem(s.location.name if s.location else ""))
             self.table.setItem(r, 3, QTableWidgetItem(str(getattr(s, "created_at", ""))))
 
-    def selected_sale_id(self):
-        row = self.table.currentRow()
-        if row < 0:
-            return None
-        try:
-            return int(self.table.item(row, 0).text())
-        except Exception:
-            return None
-
-    def open_details(self):
-        sale_id = self.selected_sale_id()
-        if not sale_id:
+    def open_details(self, row, col):
+        if row < 0 or row >= len(self._rows):
             return
-        dlg = SaleDetailsDialog(self, sale_id=sale_id)
-        dlg.exec()
+        s = self._rows[row]
+        SaleDetailsDialog(self, int(s.id)).exec()
 
     def add_sale(self):
         if not AppState.can_add_transactions():

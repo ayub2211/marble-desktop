@@ -1,10 +1,13 @@
 # src/ui/pages/purchases.py
+from __future__ import annotations
+
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QDialog, QFormLayout, QLineEdit,
-    QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox
+    QMessageBox, QComboBox, QSpinBox, QDoubleSpinBox, QFileDialog
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPdfWriter, QPainter, QFont, QPageSize
 
 from src.db.session import get_db
 from src.db.location_repo import list_locations
@@ -12,6 +15,123 @@ from src.db.item_repo import get_items
 from src.db.purchase_repo import create_purchase, list_purchases, get_purchase_details
 from src.ui.signals import signals
 from src.ui.app_state import AppState
+
+
+def _fmt_dt(v) -> str:
+    return "" if not v else str(v)
+
+
+def export_purchase_pdf(parent, purchase_obj, out_path: str):
+    """
+    Qt-native PDF export (auto-fit columns + no cutting).
+    """
+    writer = QPdfWriter(out_path)
+    writer.setPageSize(QPageSize(QPageSize.A4))
+    writer.setTitle(f"Purchase Invoice #{purchase_obj.id}")
+
+    p = QPainter(writer)
+    try:
+        page_w = writer.width()
+        page_h = writer.height()
+        margin = 650
+        x = margin
+        y = margin
+
+        def set_font(size=12, bold=False):
+            f = QFont("Arial", size)
+            f.setBold(bold)
+            p.setFont(f)
+
+        set_font(18, True)
+        p.drawText(x, y, "Marble Inventory")
+        set_font(12, False)
+        y += 420
+        p.drawText(x, y, "Purchase Invoice")
+
+        set_font(10, False)
+        right_x = page_w - margin - 3200
+        p.drawText(right_x, y - 200, f"Invoice #: {purchase_obj.id}")
+        p.drawText(right_x, y + 250, f"Date: {_fmt_dt(getattr(purchase_obj, 'created_at', ''))}")
+
+        y += 650
+
+        set_font(11, True)
+        p.drawText(x, y, f"Vendor: {purchase_obj.vendor_name or ''}")
+        y += 320
+        set_font(11, False)
+        p.drawText(x, y, f"Location: {purchase_obj.location.name if purchase_obj.location else ''}")
+        y += 320
+        p.drawText(x, y, f"Notes: {getattr(purchase_obj, 'notes', '') or ''}")
+        y += 550
+
+        cols = [
+            ("SKU", 12),
+            ("Item", 38),
+            ("Cat", 12),
+            ("Qty P", 10),
+            ("Unit P", 8),
+            ("Qty S", 10),
+            ("Unit S", 10),
+        ]
+
+        available_w = page_w - (2 * margin)
+        total_weight = sum(w for _, w in cols)
+        col_widths = [int(available_w * (w / total_weight)) for _, w in cols]
+        row_h = 420
+
+        def draw_row(row_y, values, is_header=False):
+            cx = x
+            p.setFont(QFont("Arial", 10, QFont.Bold if is_header else QFont.Normal))
+
+            for i, val in enumerate(values):
+                w = col_widths[i]
+                p.drawRect(cx, row_y, w, row_h)
+
+                pad = 120
+                text_rect_w = max(50, w - (2 * pad))
+                txt = p.fontMetrics().elidedText(str(val), Qt.ElideRight, text_rect_w)
+                p.drawText(cx + pad, row_y + 280, txt)
+
+                cx += w
+
+        draw_row(y, [c[0] for c in cols], is_header=True)
+        y += row_h
+
+        total_primary = 0.0
+        total_secondary = 0
+
+        items = list(getattr(purchase_obj, "items", []) or [])
+        for it in items:
+            sku = it.item.sku if it.item else ""
+            name = it.item.name if it.item else ""
+            cat = (it.item.category or "") if it.item else ""
+            qty_p = float(it.qty_primary or 0)
+            unit_p = it.unit_primary or ""
+            qty_s = "" if it.qty_secondary is None else str(int(it.qty_secondary or 0))
+            unit_s = it.unit_secondary or ""
+
+            total_primary += qty_p
+            if it.qty_secondary is not None:
+                total_secondary += int(it.qty_secondary or 0)
+
+            draw_row(y, [sku, name, cat, f"{qty_p:.3f}", unit_p, qty_s, unit_s])
+            y += row_h
+
+            if y > page_h - margin - 1200:
+                writer.newPage()
+                y = margin
+                draw_row(y, [c[0] for c in cols], is_header=True)
+                y += row_h
+
+        y += 500
+        p.setFont(QFont("Arial", 11, QFont.Bold))
+        p.drawText(x, y, f"Total Primary: {total_primary:.3f}")
+        y += 320
+        p.drawText(x, y, f"Total Secondary: {total_secondary}")
+
+    finally:
+        p.end()
+
 
 
 class AddPurchaseDialog(QDialog):
@@ -152,35 +272,108 @@ class AddPurchaseDialog(QDialog):
                 continue
 
             cat = (it.category or "").upper()
+            pri = float(qty_pri.value())
+
+            if pri <= 0:
+                continue
 
             if cat in ("SLAB", "TILE"):
-                rows_payload.append({
-                    "item_id": item_id,
-                    "qty_secondary": int(qty_sec.value()),
-                    "qty_primary": float(qty_pri.value()),
-                })
+                sec = int(qty_sec.value())
+                if sec <= 0:
+                    continue
+                rows_payload.append({"item_id": item_id, "qty_secondary": sec, "qty_primary": pri})
             else:
-                rows_payload.append({
-                    "item_id": item_id,
-                    "qty_secondary": None,
-                    "qty_primary": float(qty_pri.value()),
-                })
+                rows_payload.append({"item_id": item_id, "qty_secondary": None, "qty_primary": pri})
 
         if not rows_payload:
-            QMessageBox.warning(self, "Missing", "Add at least one valid item line.")
+            QMessageBox.warning(self, "Missing", "Add at least one valid item line (qty > 0).")
             return
 
-        self._data = {
-            "vendor_name": vendor,
-            "location_id": location_id,
-            "notes": None,
-            "rows": rows_payload
-        }
+        self._data = {"vendor_name": vendor, "location_id": location_id, "notes": None, "rows": rows_payload}
         self.accept()
 
     @property
     def data(self):
         return getattr(self, "_data", None)
+
+
+class PurchaseDetailsDialog(QDialog):
+    def __init__(self, parent, purchase_id: int):
+        super().__init__(parent)
+        self.purchase_id = int(purchase_id)
+        self.setWindowTitle(f"Purchase Details #{self.purchase_id}")
+        self.setMinimumWidth(920)
+        self.setMinimumHeight(520)
+
+        layout = QVBoxLayout(self)
+
+        with get_db() as db:
+            self.pur = get_purchase_details(db, self.purchase_id)
+
+        if not self.pur:
+            QMessageBox.warning(self, "Not found", "Purchase not found.")
+            self.reject()
+            return
+
+        header = QLabel(
+            f"<b>Vendor:</b> {self.pur.vendor_name or ''} &nbsp;&nbsp; "
+            f"<b>Location:</b> {(self.pur.location.name if self.pur.location else '')} &nbsp;&nbsp; "
+            f"<b>Created:</b> {_fmt_dt(getattr(self.pur, 'created_at', ''))}<br>"
+            f"<b>Notes:</b> {getattr(self.pur, 'notes', '') or ''}"
+        )
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["SKU", "Item", "Category", "Qty Primary", "Unit P", "Qty Secondary", "Unit S"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        self._fill()
+
+        btns = QHBoxLayout()
+        self.pdf_btn = QPushButton("Save PDF")
+        self.close_btn = QPushButton("Close")
+        btns.addWidget(self.pdf_btn)
+        btns.addStretch()
+        btns.addWidget(self.close_btn)
+        layout.addLayout(btns)
+
+        self.close_btn.clicked.connect(self.reject)
+        self.pdf_btn.clicked.connect(self.save_pdf)
+
+    def _fill(self):
+        self.table.setRowCount(0)
+        items = list(getattr(self.pur, "items", []) or [])
+        for r, it in enumerate(items):
+            self.table.insertRow(r)
+            sku = it.item.sku if it.item else ""
+            name = it.item.name if it.item else ""
+            cat = (it.item.category or "") if it.item else ""
+            qty_p = float(it.qty_primary or 0)
+            unit_p = it.unit_primary or ""
+            qty_s = "" if it.qty_secondary is None else str(int(it.qty_secondary or 0))
+            unit_s = it.unit_secondary or ""
+
+            self.table.setItem(r, 0, QTableWidgetItem(sku))
+            self.table.setItem(r, 1, QTableWidgetItem(name))
+            self.table.setItem(r, 2, QTableWidgetItem(str(cat)))
+            self.table.setItem(r, 3, QTableWidgetItem(f"{qty_p:.3f}"))
+            self.table.setItem(r, 4, QTableWidgetItem(unit_p))
+            self.table.setItem(r, 5, QTableWidgetItem(qty_s))
+            self.table.setItem(r, 6, QTableWidgetItem(unit_s))
+
+    def save_pdf(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Purchase Invoice PDF", f"purchase_{self.purchase_id}.pdf", "PDF Files (*.pdf)"
+        )
+        if not path:
+            return
+        try:
+            export_purchase_pdf(self, self.pur, path)
+            QMessageBox.information(self, "Saved", f"PDF saved:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"PDF failed:\n{e}")
 
 
 class PurchasesPage(QWidget):
@@ -209,11 +402,10 @@ class PurchasesPage(QWidget):
         self.table.setHorizontalHeaderLabels(["ID", "Vendor", "Location", "Created"])
         self.table.setColumnHidden(0, True)
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.cellDoubleClicked.connect(self.open_details)
         layout.addWidget(self.table)
 
-        # ✅ View details
-        self.table.doubleClicked.connect(self.open_details)
-
+        self._rows = []
         self.apply_permissions()
         self.load_data()
 
@@ -226,12 +418,21 @@ class PurchasesPage(QWidget):
         self.table.setRowCount(0)
         with get_db() as db:
             rows = list_purchases(db, self.search.text().strip())
-            for r, p in enumerate(rows):
-                self.table.insertRow(r)
-                self.table.setItem(r, 0, QTableWidgetItem(str(p.id)))
-                self.table.setItem(r, 1, QTableWidgetItem(p.vendor_name or ""))
-                self.table.setItem(r, 2, QTableWidgetItem(p.location.name if p.location else ""))
-                self.table.setItem(r, 3, QTableWidgetItem(str(getattr(p, "created_at", ""))))
+
+        self._rows = rows
+
+        for r, p in enumerate(rows):
+            self.table.insertRow(r)
+            self.table.setItem(r, 0, QTableWidgetItem(str(p.id)))
+            self.table.setItem(r, 1, QTableWidgetItem(p.vendor_name or ""))
+            self.table.setItem(r, 2, QTableWidgetItem(p.location.name if p.location else ""))
+            self.table.setItem(r, 3, QTableWidgetItem(str(getattr(p, "created_at", ""))))
+
+    def open_details(self, row, col):
+        if row < 0 or row >= len(self._rows):
+            return
+        p = self._rows[row]
+        PurchaseDetailsDialog(self, int(p.id)).exec()
 
     def add_purchase(self):
         if not AppState.can_add_transactions():
@@ -253,73 +454,3 @@ class PurchasesPage(QWidget):
                 QMessageBox.information(self, "Saved", "Purchase saved ✅")
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Could not save purchase:\n{e}")
-
-    def open_details(self):
-        row = self.table.currentRow()
-        if row < 0:
-            return
-
-        try:
-            pid = int(self.table.item(row, 0).text())
-        except Exception:
-            return
-
-        with get_db() as db:
-            p = get_purchase_details(db, pid)
-
-        if not p:
-            QMessageBox.warning(self, "Not found", "Purchase not found.")
-            return
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Purchase #{p.id} — Details")
-        dlg.setMinimumWidth(950)
-        layout = QVBoxLayout(dlg)
-
-        vendor = p.vendor_name or "-"
-        loc = p.location.name if p.location else "-"
-        created = str(getattr(p, "created_at", ""))
-        notes = getattr(p, "notes", None) or "-"
-
-        header = QLabel(
-            f"<b>Vendor:</b> {vendor}<br>"
-            f"<b>Location:</b> {loc}<br>"
-            f"<b>Created:</b> {created}<br>"
-            f"<b>Notes:</b> {notes}"
-        )
-        header.setTextFormat(Qt.RichText)
-        layout.addWidget(header)
-
-        lines = QTableWidget(0, 7)
-        lines.setHorizontalHeaderLabels(
-            ["SKU", "Name", "Category", "Primary Qty", "Primary Unit", "Secondary Qty", "Secondary Unit"]
-        )
-        lines.horizontalHeader().setStretchLastSection(True)
-
-        items = getattr(p, "items", []) or []
-        for r, li in enumerate(items):
-            it = getattr(li, "item", None)
-            sku = getattr(it, "sku", "") if it else ""
-            name = getattr(it, "name", "") if it else ""
-            cat = getattr(it, "category", "") if it else ""
-
-            lines.insertRow(r)
-            lines.setItem(r, 0, QTableWidgetItem(sku or ""))
-            lines.setItem(r, 1, QTableWidgetItem(name or ""))
-            lines.setItem(r, 2, QTableWidgetItem(cat or ""))
-
-            pri = float(getattr(li, "qty_primary", 0) or 0)
-            lines.setItem(r, 3, QTableWidgetItem(f"{pri:.3f}"))
-            lines.setItem(r, 4, QTableWidgetItem(getattr(li, "unit_primary", "") or ""))
-
-            sec_qty = getattr(li, "qty_secondary", None)
-            lines.setItem(r, 5, QTableWidgetItem("" if sec_qty is None else str(int(sec_qty))))
-            lines.setItem(r, 6, QTableWidgetItem(getattr(li, "unit_secondary", "") or ""))
-
-        layout.addWidget(lines)
-
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dlg.accept)
-        layout.addWidget(close_btn, alignment=Qt.AlignRight)
-
-        dlg.exec()

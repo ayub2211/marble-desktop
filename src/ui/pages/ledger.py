@@ -1,12 +1,15 @@
 # src/ui/pages/ledger.py
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QTableWidget, QTableWidgetItem, QComboBox, QPushButton, QDialog, QMessageBox
+    QTableWidget, QTableWidgetItem, QComboBox, QPushButton,
+    QDialog, QMessageBox
 )
 from PySide6.QtCore import Qt
 
 from src.db.session import get_db
 from src.db.ledger_repo import list_ledger
+
+# ✅ Repo detail fetchers (no circular imports)
 from src.db.purchase_repo import get_purchase_details
 from src.db.sales_repo import get_sale_details
 from src.db.returns_repo import get_sale_return_details, get_purchase_return_details
@@ -31,6 +34,8 @@ class PurchaseDetailsDialog(QDialog):
             "Qty Secondary", "Unit S"
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
 
         btn_row = QHBoxLayout()
@@ -106,6 +111,8 @@ class SaleDetailsDialog(QDialog):
             "Qty Secondary", "Unit S"
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
 
         btn_row = QHBoxLayout()
@@ -183,6 +190,8 @@ class ReturnDetailsDialog(QDialog):
             "Qty Secondary", "Unit S"
         ])
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
 
         btn_row = QHBoxLayout()
@@ -307,23 +316,27 @@ class LedgerEntryDialog(QDialog):
             QMessageBox.information(self, "No Ref", "This ledger entry has no source reference.")
             return
 
-        if ref_type == "purchase":
-            PurchaseDetailsDialog(self, purchase_id=int(ref_id)).exec()
-            return
+        try:
+            if ref_type == "purchase":
+                PurchaseDetailsDialog(self, purchase_id=int(ref_id)).exec()
+                return
 
-        if ref_type == "sale":
-            SaleDetailsDialog(self, sale_id=int(ref_id)).exec()
-            return
+            if ref_type == "sale":
+                SaleDetailsDialog(self, sale_id=int(ref_id)).exec()
+                return
 
-        if ref_type == "sale_return":
-            ReturnDetailsDialog(self, return_type="SALE_RETURN", return_id=int(ref_id)).exec()
-            return
+            if ref_type == "sale_return":
+                ReturnDetailsDialog(self, return_type="SALE_RETURN", return_id=int(ref_id)).exec()
+                return
 
-        if ref_type == "purchase_return":
-            ReturnDetailsDialog(self, return_type="PURCHASE_RETURN", return_id=int(ref_id)).exec()
-            return
+            if ref_type == "purchase_return":
+                ReturnDetailsDialog(self, return_type="PURCHASE_RETURN", return_id=int(ref_id)).exec()
+                return
 
-        QMessageBox.information(self, "Unsupported", f"Open Ref not supported for ref_type: {ref_type}")
+            QMessageBox.information(self, "Unsupported", f"Open Ref not supported for ref_type: {ref_type}")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
 
 
 class LedgerPage(QWidget):
